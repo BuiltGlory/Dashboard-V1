@@ -6,12 +6,10 @@ import {
   Check,
   ChevronLeft,
   ChevronRight,
-  Clock,
   Mail,
   MessageCircle,
   Phone,
   Settings,
-  ShieldCheck,
   X,
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
@@ -114,28 +112,6 @@ function PriorityBadge({ priority }: { priority: AcquisitionPriority }) {
   if (priority === 'urgent') return <Badge variant="red">Urgent</Badge>
   if (priority === 'high') return <Badge variant="orange">High</Badge>
   return null
-}
-
-function KycStatusBadge({ status }: { status: Acquisition['sellerKycStatus'] }) {
-  if (status === 'verified') {
-    return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700">
-        <ShieldCheck className="size-3.5" /> KYC Verified
-      </span>
-    )
-  }
-  if (status === 'pending') {
-    return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-orange-100 px-2 py-0.5 text-xs font-medium text-orange-700">
-        <Clock className="size-3.5" /> KYC Pending
-      </span>
-    )
-  }
-  return (
-    <span className="inline-flex items-center gap-1 rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700">
-      <X className="size-3.5" /> KYC Rejected
-    </span>
-  )
 }
 
 function DetailSkeleton() {
@@ -278,7 +254,6 @@ function AcquisitionRightColumn({
               </Badge>
             </div>
           </div>
-          <KycStatusBadge status={acquisition.sellerKycStatus} />
           <button
             type="button"
             onClick={copyPhone}

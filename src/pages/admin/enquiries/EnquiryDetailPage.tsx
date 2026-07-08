@@ -493,6 +493,7 @@ export function EnquiryDetailPage() {
           )
           sendPushNotification(updated.buyerName, template, 'N-02', {
             dedupeKey: `N-02:${updated.id}`,
+            audience: 'buyer',
             relatedTo: { type: 'enquiry', id: updated.id },
           })
           setToast('Response recorded. Buyer notified via N-02.')
@@ -1314,7 +1315,7 @@ export function EnquiryDetailPage() {
                     enquiry.buyerName,
                     enquiry.propertyTitle,
                   ).body}
-                  deepLink="P-02 My Enquiries"
+                  deepLink="P-08"
                   className="mt-2"
                 />
               )}

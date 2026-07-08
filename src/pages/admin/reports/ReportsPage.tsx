@@ -30,11 +30,10 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import {
-  absoluteAdminDownloadUrl,
   createAdminReportExport,
+  downloadAdminReportExportFile,
   getAcquisitionAnalytics,
   getAdminReportExport,
-  getAdminReportExportDownloadUrl,
   getPropertyTypeLabel,
   getRevenueAnalytics,
   getSalesAnalytics,
@@ -61,9 +60,10 @@ import {
   type Acquisition,
   type AcquisitionStage,
 } from '@/api/adminAcquisitions'
+import { listAdminSellRequests, type SellRequest } from '@/api/adminEnquiries'
 import { cn } from '@/lib/utils'
 import { chartHasNumericData } from '@/utils/edgeCases'
-import { readAdminSession } from '@/api/admin'
+import { formatAdminApiError, readAdminSession } from '@/api/admin'
 
 type ReportTab = 'sales' | 'acquisition' | 'revenue' | 'export'
 type DateRangeKey = 'week' | 'month' | 'quarter' | 'year' | 'custom'
@@ -133,7 +133,7 @@ const EXPORT_FIELD_OPTIONS: Record<string, string[]> = {
     'Location',
     'Added Date',
   ],
-  users: ['ID', 'Name', 'Phone', 'Email', 'Type', 'KYC Status', 'Registered'],
+  users: ['ID', 'Name', 'Phone', 'Email', 'Type', 'Registered'],
   sales: ['Deal ID', 'Buyer', 'Property', 'Stage', 'Amount', 'Date'],
   acquisitions: ['ID', 'Property', 'Seller', 'Stage', 'Price', 'Date'],
 }
@@ -451,6 +451,7 @@ export function ReportsPage() {
   const [loadError, setLoadError] = useState<string | null>(null)
   const [salesDeals, setSalesDeals] = useState<SalesDeal[]>([])
   const [acquisitions, setAcquisitions] = useState<Acquisition[]>([])
+  const [sellRequests, setSellRequests] = useState<SellRequest[]>([])
   const [properties, setProperties] = useState<ReportProperty[]>([])
   const [users, setUsers] = useState<ReportUser[]>([])
   const [exportJobs, setExportJobs] = useState<ReportExportRequest[]>([])
@@ -499,15 +500,20 @@ export function ReportsPage() {
     setLoading(true)
     setLoadError(null)
     try {
-      const [salesResult, acquisitionResult, propertyResult, userResult, exportResult] = await Promise.all([
+      const [salesResult, acquisitionResult, propertyResult, userResult, exportResult, sellRequestResult] =
+        await Promise.all([
         listAdminSalesDeals(session.accessToken, { limit: 100, sort: 'newest' }),
         listAdminAcquisitions(session.accessToken, { limit: 100, sort: 'newest' }),
         listAdminReportProperties(session.accessToken, { limit: 100, sort: 'newest' }),
         listAdminReportUsers(session.accessToken, { limit: 100, sort: 'newest' }),
         listAdminReportExports(session.accessToken).catch(() => ({ data: [] as ReportExportRequest[] })),
+        listAdminSellRequests(session.accessToken, { limit: 100, sort: 'newest' }).catch(() => ({
+          data: [] as SellRequest[],
+        })),
       ])
       setSalesDeals(salesResult.data)
       setAcquisitions(acquisitionResult.data)
+      setSellRequests(sellRequestResult.data)
       setProperties(propertyResult.data)
       setUsers(userResult.data)
       setExportJobs(exportResult.data)
@@ -532,19 +538,32 @@ export function ReportsPage() {
       propertyType: propertyType === 'all' ? undefined : propertyType,
     }
     try {
-      const [sales, acquisition, revenue] = await Promise.all([
+      const [salesResult, acquisitionResult, revenueResult] = await Promise.allSettled([
         getSalesAnalytics(session.accessToken, params),
         getAcquisitionAnalytics(session.accessToken, params),
         getRevenueAnalytics(session.accessToken, params),
       ])
-      setSalesAnalytics(sales)
-      setAcquisitionAnalytics(acquisition)
-      setRevenueAnalytics(revenue)
+
+      if (salesResult.status === 'fulfilled') setSalesAnalytics(salesResult.value)
+      else setSalesAnalytics(null)
+
+      if (acquisitionResult.status === 'fulfilled') setAcquisitionAnalytics(acquisitionResult.value)
+      else setAcquisitionAnalytics(null)
+
+      if (revenueResult.status === 'fulfilled') setRevenueAnalytics(revenueResult.value)
+      else setRevenueAnalytics(null)
+
+      const failures = [salesResult, acquisitionResult, revenueResult].filter(
+        (result): result is PromiseRejectedResult => result.status === 'rejected',
+      )
+      if (failures.length === failures.length) {
+        showToast(formatAdminApiError(failures[0].reason, 'Unable to load backend report aggregates.'))
+      }
     } catch (error) {
       setSalesAnalytics(null)
       setAcquisitionAnalytics(null)
       setRevenueAnalytics(null)
-      showToast(error instanceof Error ? error.message : 'Unable to load backend report aggregates.')
+      showToast(formatAdminApiError(error, 'Unable to load backend report aggregates.'))
     }
   }, [dateRange, customFrom, customTo, propertyType, showToast])
 
@@ -570,6 +589,23 @@ export function ReportsPage() {
     return salesDeals.filter((d) => matchesPropertyType(d.propertyType, propertyType))
   }, [salesDeals, propertyType])
 
+  const dealsInPeriod = useMemo(() => {
+    return allDealsFiltered.filter((deal) =>
+      isInDateRange(deal.lastActivityAt, dateRange, customFrom, customTo),
+    )
+  }, [allDealsFiltered, dateRange, customFrom, customTo])
+
+  const activeDealsInPeriod = useMemo(() => {
+    return dealsInPeriod.filter((deal) => deal.stage !== 'closed' && deal.stage !== 'lost')
+  }, [dealsInPeriod])
+
+  const sellRequestsFiltered = useMemo(() => {
+    return sellRequests.filter((request) => {
+      if (!matchesPropertyType(request.propertyType, propertyType)) return false
+      return isInDateRange(request.submittedAt, dateRange, customFrom, customTo)
+    })
+  }, [sellRequests, propertyType, dateRange, customFrom, customTo])
+
   const acquisitionsFiltered = useMemo(() => {
     return acquisitions.filter((a) => {
       if (!matchesPropertyType(a.propertyType, propertyType)) return false
@@ -591,31 +627,55 @@ export function ReportsPage() {
   )
 
   const pipelineChartData = useMemo(() => {
-    if (acquisitionAnalytics) {
-      const counts = new Map(acquisitionAnalytics.stageCounts.map((item) => [item.stage, item.count]))
+    const acquisitionStages = (() => {
+      if (acquisitionAnalytics?.stageCounts.length) {
+        const counts = new Map(
+          acquisitionAnalytics.stageCounts.map((item) => [item.stage, item.count]),
+        )
+        return (Object.keys(STAGE_CHART_COLORS) as AcquisitionStage[])
+          .filter((s) => s !== 'rejected')
+          .map((stage) => ({
+            stage: getStageLabel(stage),
+            count: counts.get(stage) ?? 0,
+            fill: STAGE_CHART_COLORS[stage],
+            key: stage,
+          }))
+      }
+      const counts: Partial<Record<AcquisitionStage, number>> = {}
+      for (const a of acquisitions) {
+        if (!matchesPropertyType(a.propertyType, propertyType)) continue
+        counts[a.stage] = (counts[a.stage] ?? 0) + 1
+      }
       return (Object.keys(STAGE_CHART_COLORS) as AcquisitionStage[])
         .filter((s) => s !== 'rejected')
         .map((stage) => ({
           stage: getStageLabel(stage),
-          count: counts.get(stage) ?? 0,
+          count: counts[stage] ?? 0,
           fill: STAGE_CHART_COLORS[stage],
           key: stage,
         }))
-    }
-    const counts: Partial<Record<AcquisitionStage, number>> = {}
-    for (const a of acquisitions) {
-      if (!matchesPropertyType(a.propertyType, propertyType)) continue
-      counts[a.stage] = (counts[a.stage] ?? 0) + 1
-    }
-    return (Object.keys(STAGE_CHART_COLORS) as AcquisitionStage[])
-      .filter((s) => s !== 'rejected')
-      .map((stage) => ({
-        stage: getStageLabel(stage),
-        count: counts[stage] ?? 0,
-        fill: STAGE_CHART_COLORS[stage],
-        key: stage,
+    })()
+
+    const sellRequestStages = (() => {
+      const source =
+        acquisitionAnalytics?.sellRequestsByStatus ??
+        sellRequestsFiltered.reduce<Map<string, number>>((map, request) => {
+          map.set(request.status, (map.get(request.status) ?? 0) + 1)
+          return map
+        }, new Map())
+      const entries = Array.isArray(source)
+        ? source.map((item) => [item.status, item.count] as const)
+        : Array.from(source.entries())
+      return entries.map(([status, count]) => ({
+        stage: status.replace(/_/g, ' '),
+        count,
+        fill: '#0ea5e9',
+        key: `sell-${status}`,
       }))
-  }, [acquisitions, propertyType, acquisitionAnalytics])
+    })()
+
+    return [...acquisitionStages, ...sellRequestStages]
+  }, [acquisitions, propertyType, acquisitionAnalytics, sellRequestsFiltered])
 
   const pendingPayments = useMemo(() => {
     return salesDeals.filter((d) => {
@@ -632,19 +692,33 @@ export function ReportsPage() {
   }, [salesDeals, propertyType])
 
   const mostComparedProperties = useMemo(() => {
+    if (salesAnalytics?.propertyComparison?.length) {
+      return salesAnalytics.propertyComparison
+    }
     return [...properties]
       .filter((property) => !property.isDeleted)
       .sort((a, b) => b.compareCount - a.compareCount)
       .slice(0, 5)
-  }, [properties])
+  }, [properties, salesAnalytics])
 
   const salesStats = useMemo(() => {
+    const pipelineCount =
+      salesAnalytics?.stats.pipelineCount ?? activeDealsInPeriod.length
+    const pipelineValue =
+      salesAnalytics?.stats.pipelineValue ??
+      activeDealsInPeriod.reduce(
+        (sum, deal) => sum + (deal.agreedPrice ?? deal.offeredPrice ?? deal.propertyPrice ?? 0),
+        0,
+      )
+
     if (salesAnalytics) {
       return {
         count: salesAnalytics.stats.count,
         revenue: salesAnalytics.stats.revenue,
         avg: salesAnalytics.stats.averageDealValue,
         conversion: Math.round(salesAnalytics.stats.conversion),
+        pipelineCount,
+        pipelineValue,
       }
     }
     const revenue = closedDeals.reduce((s, d) => s + (d.agreedPrice ?? 0), 0)
@@ -656,16 +730,22 @@ export function ReportsPage() {
       revenue,
       avg: count > 0 ? revenue / count : 0,
       conversion,
+      pipelineCount,
+      pipelineValue,
     }
-  }, [closedDeals, allDealsFiltered, salesAnalytics])
+  }, [closedDeals, allDealsFiltered, salesAnalytics, activeDealsInPeriod])
 
   const acquisitionStats = useMemo(() => {
+    const incomingSellRequests =
+      acquisitionAnalytics?.stats.incomingSellRequests ?? sellRequestsFiltered.length
+
     if (acquisitionAnalytics) {
       return {
         count: acquisitionAnalytics.stats.count,
         cost: acquisitionAnalytics.stats.cost,
         avg: acquisitionAnalytics.stats.averageCost,
         pipelineActive: acquisitionAnalytics.stats.pipelineActive,
+        incomingSellRequests,
       }
     }
     const acquired = acquiredList
@@ -677,8 +757,9 @@ export function ReportsPage() {
       cost,
       avg: count > 0 ? cost / count : 0,
       pipelineActive,
+      incomingSellRequests,
     }
-  }, [acquiredList, pipelineList, acquisitionAnalytics])
+  }, [acquiredList, pipelineList, acquisitionAnalytics, sellRequestsFiltered.length])
 
   const revenueStats = useMemo(() => {
     if (revenueAnalytics) return revenueAnalytics.stats
@@ -690,17 +771,23 @@ export function ReportsPage() {
   }, [closedDeals, acquiredList, revenueAnalytics])
 
   const dealsByMonth = useMemo(() => {
-    if (salesAnalytics) {
+    if (salesAnalytics?.monthlyDealActivity?.length) {
+      return salesAnalytics.monthlyDealActivity.map((item) => ({
+        month: formatMonthLabel(item.month),
+        deals: item.deals,
+      }))
+    }
+    if (salesAnalytics?.monthlyClosedDeals.length) {
       return salesAnalytics.monthlyClosedDeals.map((item) => ({
         month: formatMonthLabel(item.month),
         deals: item.deals,
       }))
     }
     const counts = new Map<string, { sort: string; month: string; deals: number }>()
-    for (const deal of closedDeals) {
-      const month = monthKey(deal.closedAt)
+    for (const deal of dealsInPeriod) {
+      const month = monthKey(deal.lastActivityAt)
       if (!month) continue
-      const sort = monthSortKey(deal.closedAt)
+      const sort = monthSortKey(deal.lastActivityAt)
       const current = counts.get(sort) ?? { sort, month, deals: 0 }
       current.deals += 1
       counts.set(sort, current)
@@ -708,13 +795,17 @@ export function ReportsPage() {
     return Array.from(counts.values())
       .sort((a, b) => a.sort.localeCompare(b.sort))
       .map(({ month, deals }) => ({ month, deals }))
-  }, [closedDeals, salesAnalytics])
+  }, [dealsInPeriod, salesAnalytics])
 
   const revenueByType = useMemo(
     () => {
-      if (salesAnalytics) {
-        const total = salesAnalytics.revenueByType.reduce((sum, item) => sum + item.revenue, 0)
-        return salesAnalytics.revenueByType.map((item) => {
+      const source =
+        salesAnalytics?.revenueByTypeAll?.length
+          ? salesAnalytics.revenueByTypeAll
+          : salesAnalytics?.revenueByType
+      if (source?.length) {
+        const total = source.reduce((sum, item) => sum + item.revenue, 0)
+        return source.map((item) => {
           const type = normalizePropertyType(item.type)
           return {
             name: getPropertyTypeLabel(item.type),
@@ -723,9 +814,13 @@ export function ReportsPage() {
           }
         })
       }
-      return buildTypeDonut(closedDeals, (deal) => deal.agreedPrice ?? 0, (deal) => deal.propertyType)
+      return buildTypeDonut(
+        dealsInPeriod,
+        (deal) => deal.agreedPrice ?? deal.offeredPrice ?? deal.propertyPrice ?? 0,
+        (deal) => deal.propertyType,
+      )
     },
-    [closedDeals, salesAnalytics],
+    [dealsInPeriod, salesAnalytics],
   )
 
   const acquisitionByType = useMemo(
@@ -802,10 +897,11 @@ export function ReportsPage() {
 
   const showEmptyData =
     !loading &&
-    ((tab === 'sales' && closedDeals.length === 0) ||
+    ((tab === 'sales' && dealsInPeriod.length === 0) ||
       (tab === 'acquisition' &&
         acquiredList.length === 0 &&
-        pipelineList.length === 0))
+        pipelineList.length === 0 &&
+        sellRequestsFiltered.length === 0))
 
   const buildExportRows = (type: string): Array<Record<string, unknown>> => {
     const inExportRange = (iso: string | null) =>
@@ -834,7 +930,6 @@ export function ReportsPage() {
           Phone: user.phone,
           Email: user.email,
           Type: user.userType,
-          'KYC Status': user.kycStatus,
           Registered: user.registeredAt,
         }))
     }
@@ -872,7 +967,11 @@ export function ReportsPage() {
     return []
   }
 
-  const handleExport = async (type: string, format: 'csv' | 'xlsx' | 'pdf' = 'csv') => {
+  const handleExport = async (
+    type: string,
+    format: 'csv' | 'xlsx' | 'pdf' = 'csv',
+    options: { useDateRange?: boolean; fields?: string[] } = {},
+  ) => {
     const session = readAdminSession()
     if (!session?.accessToken) {
       showToast('Admin session expired. Please sign in again.')
@@ -881,23 +980,36 @@ export function ReportsPage() {
 
     setExporting(true)
     try {
-      const queued = await createAdminReportExport(session.accessToken, {
+      const filters: Record<string, unknown> = {
         reportType: type,
         format,
-        fields: Array.from(exportFields),
-        from: exportFrom,
-        to: exportTo,
         estimatedRows: buildExportRows(type).length,
-        deliveryEmail: exportEmail,
-      })
+      }
+      if (options.fields?.length) filters.fields = options.fields
+      if (options.useDateRange) {
+        filters.from = exportFrom
+        filters.to = exportTo
+        if (exportEmail) filters.deliveryEmail = exportEmail
+      }
+
+      const queued = await createAdminReportExport(session.accessToken, filters)
       setExportJobs((prev) => [queued, ...prev.filter((job) => job.referenceId !== queued.referenceId)].slice(0, 20))
-      showToast(
-        queued.status === 'completed'
-          ? `Export ${queued.referenceId} generated with ${(queued.rowCount ?? 0).toLocaleString('en-IN')} rows.`
-          : `Export ${queued.referenceId} is ${queued.status}.`,
-      )
+
+      if (queued.status === 'completed') {
+        await downloadAdminReportExportFile(
+          session.accessToken,
+          queued.id ?? queued.referenceId,
+          queued.fileName,
+        )
+        showToast(
+          `Downloaded ${queued.fileName ?? queued.referenceId} (${(queued.rowCount ?? 0).toLocaleString('en-IN')} rows).`,
+        )
+        return
+      }
+
+      showToast(`Export ${queued.referenceId} is ${queued.status}.`)
     } catch (error) {
-      showToast(error instanceof Error ? error.message : 'Unable to queue export.')
+      showToast(formatAdminApiError(error, 'Unable to queue export.'))
     } finally {
       setExporting(false)
     }
@@ -921,17 +1033,15 @@ export function ReportsPage() {
         showToast(`Export ${latest.referenceId} is ${latest.status}.`)
         return
       }
-      const download = await getAdminReportExportDownloadUrl(
+
+      await downloadAdminReportExportFile(
         session.accessToken,
         latest.id ?? latest.referenceId,
+        latest.fileName,
       )
-      if (!download.downloadUrl) {
-        showToast(`Export ${latest.referenceId} is not ready to download.`)
-        return
-      }
-      window.open(absoluteAdminDownloadUrl(download.downloadUrl), '_blank', 'noopener,noreferrer')
+      showToast(`Downloaded ${latest.fileName ?? latest.referenceId}.`)
     } catch (error) {
-      showToast(error instanceof Error ? error.message : 'Unable to download export.')
+      showToast(formatAdminApiError(error, 'Unable to download export.'))
     }
   }
 
@@ -1043,26 +1153,26 @@ export function ReportsPage() {
         <div className="space-y-6">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
             <StatCard
-              label="Total Deals Closed"
-              value={String(salesStats.count)}
+              label="Active Deals"
+              value={String(salesStats.pipelineCount)}
               icon={Handshake}
               iconWrapClass="bg-blue-100 text-blue-600"
             />
             <StatCard
-              label="Total Revenue"
-              value={formatPrice(salesStats.revenue)}
+              label="Pipeline Value"
+              value={formatPrice(salesStats.pipelineValue)}
               icon={TrendingUp}
               iconWrapClass="bg-green-100 text-green-600"
             />
             <StatCard
-              label="Average Deal Size"
-              value={salesStats.count > 0 ? formatPrice(salesStats.avg) : '—'}
+              label="Deals Closed"
+              value={String(salesStats.count)}
               icon={BarChart2}
               iconWrapClass="bg-purple-100 text-purple-600"
             />
             <StatCard
-              label="Conversion Rate"
-              value={`${salesStats.conversion}%`}
+              label="Closed Revenue"
+              value={formatPrice(salesStats.revenue)}
               icon={Target}
               iconWrapClass="bg-orange-100 text-orange-600"
             />
@@ -1071,7 +1181,7 @@ export function ReportsPage() {
           <div className="grid gap-6 lg:grid-cols-2">
             <Card>
               <CardHeader className="pb-2">
-                <CardTitle className="text-base">Deals Closed by Month</CardTitle>
+                <CardTitle className="text-base">Deal Activity by Month</CardTitle>
               </CardHeader>
               <CardContent>
                 {!chartHasNumericData(dealsByMonth, ['deals']) ? (
@@ -1121,6 +1231,65 @@ export function ReportsPage() {
                   <tbody>
                     {mostComparedProperties.map((property) => (
                       <ComparedPropertyRow key={property.id} property={property} />
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base">Active Deals</CardTitle>
+            </CardHeader>
+            <CardContent className="overflow-x-auto">
+              {activeDealsInPeriod.length === 0 ? (
+                <p className="py-8 text-center text-sm text-muted-foreground">
+                  No active deals in this period
+                </p>
+              ) : (
+                <table className="min-w-[720px] w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-border text-left text-xs uppercase text-muted-foreground">
+                      <th className="px-3 py-2">Buyer</th>
+                      <th className="px-3 py-2">Property</th>
+                      <th className="px-3 py-2">Stage</th>
+                      <th className="px-3 py-2">Agreed Price</th>
+                      <th className="px-3 py-2">Last Activity</th>
+                      <th className="px-3 py-2">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {activeDealsInPeriod.map((deal) => (
+                      <tr key={deal.id} className="border-b border-border hover:bg-muted/30">
+                        <td className="px-3 py-3 font-medium">{deal.buyerName}</td>
+                        <td className="px-3 py-3">{deal.propertyTitle}</td>
+                        <td className="px-3 py-3">
+                          <Badge variant="pending">{getSalesStageLabel(deal.stage)}</Badge>
+                        </td>
+                        <td className="px-3 py-3 font-semibold text-primary">
+                          {deal.agreedPrice
+                            ? formatPrice(deal.agreedPrice)
+                            : deal.offeredPrice
+                              ? formatPrice(deal.offeredPrice)
+                              : '—'}
+                        </td>
+                        <td className="px-3 py-3 text-muted-foreground">
+                          {new Date(deal.lastActivityAt).toLocaleDateString('en-IN', {
+                            day: 'numeric',
+                            month: 'short',
+                            year: 'numeric',
+                          })}
+                        </td>
+                        <td className="px-3 py-3">
+                          <Link
+                            to={`/admin/sales/${deal.id}`}
+                            className="text-primary hover:underline"
+                          >
+                            View Deal →
+                          </Link>
+                        </td>
+                      </tr>
                     ))}
                   </tbody>
                 </table>
@@ -1185,7 +1354,7 @@ export function ReportsPage() {
 
       {tab === 'acquisition' && (
         <div className="space-y-6">
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
             <StatCard
               label="Total Acquired"
               value={String(acquisitionStats.count)}
@@ -1213,6 +1382,12 @@ export function ReportsPage() {
               value={String(acquisitionStats.pipelineActive)}
               icon={TrendingUp}
               iconWrapClass="bg-orange-100 text-orange-600"
+            />
+            <StatCard
+              label="Incoming Sell Requests"
+              value={String(acquisitionStats.incomingSellRequests)}
+              icon={Building}
+              iconWrapClass="bg-sky-100 text-sky-600"
             />
           </div>
 
@@ -1259,6 +1434,57 @@ export function ReportsPage() {
               empty={showEmptyData}
             />
           </div>
+
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base">Incoming Sell Requests</CardTitle>
+            </CardHeader>
+            <CardContent className="overflow-x-auto">
+              {sellRequestsFiltered.length === 0 ? (
+                <p className="py-6 text-center text-sm text-muted-foreground">
+                  No incoming sell requests in this period
+                </p>
+              ) : (
+                <table className="min-w-[800px] w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-border text-left text-xs uppercase text-muted-foreground">
+                      <th className="px-3 py-2">Property</th>
+                      <th className="px-3 py-2">Seller</th>
+                      <th className="px-3 py-2">Status</th>
+                      <th className="px-3 py-2">Asking Price</th>
+                      <th className="px-3 py-2">Location</th>
+                      <th className="px-3 py-2">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sellRequestsFiltered.map((request) => (
+                      <tr key={request.id} className="border-b border-border hover:bg-muted/30">
+                        <td className="px-3 py-3 font-medium">
+                          {request.propertyTitle || 'Untitled property'}
+                        </td>
+                        <td className="px-3 py-3">{request.sellerName}</td>
+                        <td className="px-3 py-3">
+                          <Badge variant="pending">{request.status.replace(/_/g, ' ')}</Badge>
+                        </td>
+                        <td className="px-3 py-3">{request.askingPrice || '—'}</td>
+                        <td className="px-3 py-3 text-muted-foreground">
+                          {[request.locality, request.city].filter(Boolean).join(', ') || '—'}
+                        </td>
+                        <td className="px-3 py-3">
+                          <Link
+                            to={`/admin/enquiries/sell/${request.id}`}
+                            className="text-primary hover:underline"
+                          >
+                            View →
+                          </Link>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </CardContent>
+          </Card>
 
           <Card>
             <CardHeader className="pb-2">
@@ -1552,8 +1778,8 @@ export function ReportsPage() {
                 icon: Users,
                 iconClass: 'bg-green-100 text-green-600',
                 title: 'All Users',
-                desc: 'Export user database with KYC status and activity',
-                fields: 'ID, Name, Phone, Email, Type, KYC Status, Registered…',
+                desc: 'Export user database with activity',
+                fields: 'ID, Name, Phone, Email, Type, Registered…',
                 count: users.length,
               },
               {
@@ -1712,7 +1938,10 @@ export function ReportsPage() {
                 type="button"
                 className="w-full"
                 disabled={exporting}
-                onClick={() => handleExport(customExportType, exportFormat)}
+                onClick={() => handleExport(customExportType, exportFormat, {
+                  useDateRange: true,
+                  fields: Array.from(exportFields),
+                })}
               >
                 {exporting
                   ? 'Queueing Export...'

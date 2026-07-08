@@ -126,9 +126,14 @@ export interface SalesAnalytics {
     revenue: number
     averageDealValue: number
     conversion: number
+    pipelineCount?: number
+    pipelineValue?: number
   }
   monthlyClosedDeals: Array<{ month: string; deals: number; revenue: number }>
+  monthlyDealActivity?: Array<{ month: string; deals: number }>
   revenueByType: Array<{ type: string; revenue: number; deals: number }>
+  revenueByTypeAll?: Array<{ type: string; revenue: number; deals: number }>
+  pipelineByStage?: Array<{ stage: string; count: number }>
   propertyComparison: ReportProperty[]
 }
 
@@ -138,9 +143,11 @@ export interface AcquisitionAnalytics {
     cost: number
     averageCost: number
     pipelineActive: number
+    incomingSellRequests?: number
   }
   stageCounts: Array<{ stage: string; count: number }>
   acquisitionByType: Array<{ type: string; value: number; count: number }>
+  sellRequestsByStatus?: Array<{ status: string; count: number }>
 }
 
 export interface RevenueAnalytics {
@@ -192,11 +199,7 @@ export type CreateReportScheduleInput = {
   nextRunAt?: string
 }
 
-export function getPropertyTypeLabel(type: string) {
-  const normalized = type.trim().toLowerCase().replace(/_/g, ' ')
-  if (!normalized) return 'Property'
-  return normalized.charAt(0).toUpperCase() + normalized.slice(1)
-}
+export { getPropertyTypeLabel } from '@/domain/properties'
 
 function mapReportProperty(raw: RawEntity): ReportProperty {
   const address = objectOf(raw.address)
@@ -362,6 +365,36 @@ export async function getAdminReportExportDownloadUrl(accessToken: string, id: s
 export function absoluteAdminDownloadUrl(path: string) {
   if (/^https?:\/\//i.test(path)) return path
   return `${ADMIN_API_BASE_URL}${path.startsWith('/') ? path : `/${path}`}`
+}
+
+export async function downloadAdminReportExportFile(
+  accessToken: string,
+  id: string,
+  fileName?: string,
+) {
+  const download = await getAdminReportExportDownloadUrl(accessToken, id)
+  if (!download.downloadUrl) {
+    throw new Error('Export is not ready to download.')
+  }
+
+  const response = await fetch(absoluteAdminDownloadUrl(download.downloadUrl))
+  if (!response.ok) {
+    throw new Error('Unable to download export file.')
+  }
+
+  const blob = await response.blob()
+  const objectUrl = URL.createObjectURL(blob)
+  try {
+    const link = document.createElement('a')
+    link.href = objectUrl
+    link.download = fileName || download.fileName || 'builtglory-export'
+    link.rel = 'noopener'
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+  } finally {
+    URL.revokeObjectURL(objectUrl)
+  }
 }
 
 export async function getSalesAnalytics(

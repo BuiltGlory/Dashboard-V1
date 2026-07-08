@@ -30,14 +30,22 @@ export function isValidPhone(phone: string | null | undefined): boolean {
   return !!phone && phoneDigits(phone).length >= 10
 }
 
-export function openWhatsApp(phone: string, _name?: string): void {
-  if (!isValidPhone(phone)) return
+export function openWhatsApp(phone: string, _name?: string, toast?: ToastApi): void {
+  if (!isValidPhone(phone)) {
+    toast?.error('No valid phone number available')
+    return
+  }
   window.open(`https://wa.me/${phoneDigits(phone)}`, '_blank', 'noopener,noreferrer')
 }
 
-export function handleCall(phone: string): void {
-  if (!isValidPhone(phone)) return
-  window.open(`tel:${phone}`, '_self')
+export function handleCall(phone: string, toast?: ToastApi): void {
+  if (!isValidPhone(phone)) {
+    toast?.error('No valid phone number available')
+    return
+  }
+  const digits = phoneDigits(phone)
+  const tel = phone.trim().startsWith('+') ? `+${digits}` : digits
+  window.location.href = `tel:${tel}`
 }
 
 export function handleEmail(email: string): void {

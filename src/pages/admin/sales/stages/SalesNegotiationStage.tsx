@@ -23,6 +23,7 @@ import {
   workflowLogToPanelCall,
   workflowLogToStageNote,
 } from '@/pages/admin/workflowStagePersistence'
+import { NOTIFICATION_TEMPLATES, sendPushNotification } from '@/utils/notifications'
 
 export interface SalesNegotiationStageProps {
   deal: SalesDeal
@@ -249,6 +250,16 @@ export function SalesNegotiationStage({ deal, onStageChange }: SalesNegotiationS
     onStageChange('token_payment', {
       agreedPrice: agreedNum,
       offeredPrice: agreedNum,
+    })
+    const buyerTemplate = NOTIFICATION_TEMPLATES.N05_DEAL_CONFIRMED_BUYER(
+      deal.buyerName,
+      deal.propertyTitle,
+    )
+    sendPushNotification(deal.buyerName, buyerTemplate, 'N-05', {
+      dedupeKey: `N-05:buyer:${deal.id}`,
+      audience: 'buyer',
+      userId: deal.buyerUserId,
+      relatedTo: { type: 'sales-deal', id: deal.id },
     })
     navigate('/admin/sales/token')
   }

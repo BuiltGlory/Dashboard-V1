@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { FileText, Home, Phone, Plus, Upload, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -24,7 +24,7 @@ import { downloadTextReceipt } from '@/utils/receipts'
 
 export interface FullPaymentStageProps {
   deal: SalesDeal
-  onStageChange: (stage: SalesStage, patch?: Partial<SalesDeal>) => void
+  onStageChange: (stage: SalesStage, patch?: Partial<SalesDeal>) => boolean | Promise<boolean>
 }
 
 type PaymentMethod = 'neft' | 'upi' | 'cheque'
@@ -572,6 +572,20 @@ Total: ${formatPrice(grandTotal)}`
   const totalReceived = token + (payment?.amount ?? 0)
   const paymentComplete = payment != null && !editingPayment
 
+  const advanceToDocumentation = useCallback(
+    async (totalReceived: number) => {
+      const advanced = await onStageChange('documentation', {
+        totalPaid: totalReceived,
+        tokenPaid: true,
+      })
+      if (advanced) {
+        navigate('/admin/sales/documentation')
+      }
+      return advanced
+    },
+    [navigate, onStageChange],
+  )
+
   const paymentStatus =
     paymentComplete && agreed > 0
       ? totalReceived === agreed
@@ -631,11 +645,12 @@ Total: ${formatPrice(grandTotal)}`
       setProofUrl(uploadedProofUrl)
       setProofFile(null)
       setEditingPayment(false)
-      onStageChange(deal.stage, {
+      await onStageChange(deal.stage, {
         paymentType: updated.paymentType,
         totalPaid: updated.totalPaid,
         fullPayment: updated.fullPayment,
       })
+      await advanceToDocumentation(token + amountNum)
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Could not record payment', 'error')
     } finally {
@@ -1497,11 +1512,9 @@ Total: ${formatPrice(grandTotal)}`
                   type="button"
                   size="sm"
                   onClick={() => {
-                    onStageChange('documentation', {
-                      totalPaid: totalReceived,
-                      tokenPaid: true,
+                    void advanceToDocumentation(totalReceived).then((advanced) => {
+                      if (advanced) setShowDocConfirm(false)
                     })
-                    navigate('/admin/sales/documentation')
                   }}
                 >
                   Confirm

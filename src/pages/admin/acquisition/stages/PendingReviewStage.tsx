@@ -4,14 +4,11 @@ import {
   Box,
   ChevronLeft,
   ChevronRight,
-  Clock,
   FileImage,
   FileText,
   ImageOff,
   Phone,
   Plane,
-  ShieldCheck,
-  ShieldX,
   Video,
   X,
 } from 'lucide-react'
@@ -68,7 +65,6 @@ const CHECKLIST_ITEMS = [
   'Property photos reviewed',
   'Location verified on map',
   'Asking price is reasonable',
-  'Seller KYC verified',
   'No duplicate listing',
   'Property type matches description',
 ] as const
@@ -200,7 +196,7 @@ export function PendingReviewStage({ acquisition, onStageChange }: PendingReview
 
   const [showMoreInfoForm, setShowMoreInfoForm] = useState(false)
   const [moreInfoMessage, setMoreInfoMessage] = useState(
-    `Hi ${acquisition.sellerName}, we need the following to proceed with your listing:\n- Clear property photos\n- Valid KYC documents\nPlease update via the app.`,
+    `Hi ${acquisition.sellerName}, we need the following to proceed with your listing:\n- Clear property photos\nPlease update via the app.`,
   )
   const [sendWhatsApp, setSendWhatsApp] = useState(true)
   const [sendEmail, setSendEmail] = useState(true)
@@ -213,15 +209,11 @@ export function PendingReviewStage({ acquisition, onStageChange }: PendingReview
   const checklistChecked = checklist.filter(Boolean).length
   const checklistComplete = checklistChecked === reviewChecklistItems.length
   const hasPhotos = hasUploadedPhotos
-  const kycRejected = acquisition.sellerKycStatus === 'rejected'
-  const kycPending = acquisition.sellerKycStatus === 'pending'
-  const acceptDisabled = !hasPhotos || kycRejected
+  const acceptDisabled = !hasPhotos
 
   const acceptDisabledReason = !hasPhotos
     ? 'Add photos before accepting'
-    : kycRejected
-      ? 'Cannot accept — KYC rejected'
-      : undefined
+    : undefined
 
   const toggleChecklist = (index: number) => {
     setChecklist((prev) => {
@@ -342,17 +334,6 @@ export function PendingReviewStage({ acquisition, onStageChange }: PendingReview
 
   return (
     <div className="space-y-4">
-      {kycRejected && (
-        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-800">
-          Seller KYC rejected — cannot proceed
-        </div>
-      )}
-      {kycPending && !kycRejected && (
-        <div className="rounded-lg border border-orange-200 bg-amber-50 px-4 py-3 text-sm font-medium text-orange-800">
-          Seller KYC not verified — proceed with caution
-        </div>
-      )}
-
       <Card>
         <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2 space-y-0">
           <CardTitle>Listing Details</CardTitle>
@@ -655,25 +636,6 @@ export function PendingReviewStage({ acquisition, onStageChange }: PendingReview
           <CardTitle>Seller Verification</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          {acquisition.sellerKycStatus === 'verified' && (
-            <div className="flex items-center gap-3 rounded-lg border border-green-200 bg-green-50 p-4">
-              <ShieldCheck className="size-6 shrink-0 text-green-700" />
-              <span className="font-medium text-green-800">KYC Verified</span>
-            </div>
-          )}
-          {acquisition.sellerKycStatus === 'pending' && (
-            <div className="flex items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4">
-              <Clock className="size-6 shrink-0 text-orange-700" />
-              <span className="font-medium text-orange-800">KYC Pending — Cannot proceed</span>
-            </div>
-          )}
-          {acquisition.sellerKycStatus === 'rejected' && (
-            <div className="flex items-center gap-3 rounded-lg border border-red-200 bg-red-50 p-4">
-              <ShieldX className="size-6 shrink-0 text-red-700" />
-              <span className="font-medium text-red-800">KYC Rejected — Block acquisition</span>
-            </div>
-          )}
-
           <div className="text-sm">
             {previousListingsCount > 0 ? (
               <span className="text-foreground">

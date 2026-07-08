@@ -6,6 +6,7 @@ export type AdminPermission =
   | 'properties.write'
   | 'properties.publish'
   | 'users.read'
+  | 'users.write'
   | 'users.kyc.review'
   | 'users.fema.review'
   | 'enquiries.read'
@@ -26,6 +27,7 @@ const ALL_PERMISSIONS: AdminPermission[] = [
   'properties.write',
   'properties.publish',
   'users.read',
+  'users.write',
   'users.kyc.review',
   'users.fema.review',
   'enquiries.read',
@@ -42,7 +44,7 @@ const ALL_PERMISSIONS: AdminPermission[] = [
   'visits.write',
 ]
 
-const ROLE_PERMISSIONS: Record<string, AdminPermission[]> = {
+export const DEFAULT_ROLE_PERMISSIONS: Record<string, AdminPermission[]> = {
   super_admin: ALL_PERMISSIONS,
   admin: ALL_PERMISSIONS.filter((permission) => permission !== 'admin.access.manage'),
   operations: [
@@ -74,6 +76,7 @@ const ROLE_PERMISSIONS: Record<string, AdminPermission[]> = {
   ],
   relationship_manager: [
     'users.read',
+    'users.write',
     'users.kyc.review',
     'users.fema.review',
     'support.read',
@@ -119,7 +122,7 @@ export function getSessionPermissions(session: StoredAdminSession | null): Set<s
   if (!session) return new Set()
   if (session.admin.role === 'super_admin') return new Set(ALL_PERMISSIONS)
   const explicit = session.admin.permissions ?? []
-  const fallback = ROLE_PERMISSIONS[session.admin.role] ?? []
+  const fallback = DEFAULT_ROLE_PERMISSIONS[session.admin.role] ?? []
   return new Set(explicit.length > 0 ? explicit : fallback)
 }
 

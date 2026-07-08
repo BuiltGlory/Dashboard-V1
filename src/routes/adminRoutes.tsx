@@ -27,6 +27,7 @@ import { UserDetailPage } from '@/pages/admin/users/UserDetailPage'
 import { UsersPage } from '@/pages/admin/users/UsersPage'
 import { ReportsPage } from '@/pages/admin/reports/ReportsPage'
 import { ToolsPage } from '@/pages/admin/tools/ToolsPage'
+import { PushNotificationsPage } from '@/pages/admin/tools/PushNotificationsPage'
 import { AdminPage } from '@/pages/admin/settings/AdminPage'
 import { SupportTicketDetailPage } from '@/pages/admin/settings/SupportTicketDetailPage'
 import { LoginPage } from '@/pages/auth/LoginPage'
@@ -129,16 +130,15 @@ export const adminRoutes: RouteObject[] = [
       { path: 'sales/closed', element: guarded('/admin/sales/closed', <SalesPipelinePage />) },
       { path: 'sales/lost', element: guarded('/admin/sales/lost', <SalesPipelinePage />) },
       { path: 'sales/reengagement', element: guarded('/admin/sales/reengagement', <SalesPipelinePage />) },
-      { path: 'properties/:id', element: guarded('/admin/properties/all', <PropertyDetailPage />) },
       { path: 'properties/all', element: guarded('/admin/properties/all', <PropertiesPage />) },
       { path: 'properties/add', element: guarded('/admin/properties/add', <PropertiesPage />) },
       { path: 'properties/upload', element: guarded('/admin/properties/upload', <PropertiesPage />) },
       { path: 'properties/featured', element: guarded('/admin/properties/featured', <PropertiesPage />) },
       { path: 'properties/upcoming', element: guarded('/admin/properties/upcoming', <PropertiesPage />) },
       { path: 'properties/templates', element: guarded('/admin/properties/templates', <PropertiesPage />) },
+      { path: 'properties/:id', element: guarded('/admin/properties/all', <PropertyDetailPage />) },
       { path: 'users/:id', element: guarded('/admin/users/all', <UserDetailPage />) },
       { path: 'users/all', element: guarded('/admin/users/all', <UsersPage />) },
-      { path: 'users/kyc', element: guarded('/admin/users/kyc', <UsersPage />) },
       { path: 'users/buyers', element: guarded('/admin/users/buyers', <UsersPage />) },
       { path: 'users/sellers', element: guarded('/admin/users/sellers', <UsersPage />) },
       { path: 'reports/sales', element: guarded('/admin/reports/sales', <ReportsPage />) },
@@ -151,6 +151,7 @@ export const adminRoutes: RouteObject[] = [
       { path: 'tools/pricing', element: guarded('/admin/tools/pricing', <ToolsPage />) },
       { path: 'tools/templates', element: guarded('/admin/tools/templates', <ToolsPage />) },
       { path: 'tools/bulkmessage', element: guarded('/admin/tools/bulkmessage', <ToolsPage />) },
+      { path: 'tools/push', element: guarded('/admin/tools/push', <PushNotificationsPage />) },
       { path: 'settings/support/:id', element: guarded('/admin/settings/support', <SupportTicketDetailPage />) },
       { path: 'settings/support', element: guarded('/admin/settings/support', <AdminPage />) },
       { path: 'settings/feedback', element: guarded('/admin/settings/feedback', <AdminPage />) },

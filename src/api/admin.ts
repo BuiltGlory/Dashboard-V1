@@ -54,6 +54,29 @@ export class AdminApiError extends Error {
   }
 }
 
+export function formatAdminApiError(error: unknown, fallback = 'Request failed.'): string {
+  if (error instanceof AdminApiError) {
+    const details = error.details
+    if (Array.isArray(details) && details.length > 0) {
+      const fieldMessages = details
+        .map((detail) => {
+          if (!detail || typeof detail !== 'object') return null
+          const item = detail as { field?: string; message?: string }
+          if (!item.message) return null
+          const field = item.field?.replace(/^(body|query|params)\./, '')
+          return field ? `${field}: ${item.message}` : item.message
+        })
+        .filter((message): message is string => Boolean(message))
+      if (fieldMessages.length > 0) {
+        return fieldMessages.join('. ')
+      }
+    }
+    return error.message
+  }
+  if (error instanceof Error) return error.message
+  return fallback
+}
+
 type RequestOptions = {
   method?: 'GET' | 'POST' | 'PATCH' | 'DELETE'
   body?: Record<string, unknown>

@@ -283,10 +283,11 @@ export async function listAdminAcquisitions(
   params: Record<string, string | number | undefined> = {},
 ): Promise<AdminListResult<Acquisition>> {
   const result = await adminApiRequestEnvelope<RawEntity[]>(
-    withQuery('/admin/acquisitions', { limit: 100, ...params }),
+    withQuery('/admin/acquisitions', { limit: 100, sort: 'newest', ...params }),
     { accessToken },
   )
-  return { data: (result.data ?? []).map(mapAcquisition), meta: result.meta }
+  const rows = Array.isArray(result.data) ? result.data : []
+  return { data: rows.map(mapAcquisition), meta: result.meta }
 }
 
 export async function getAdminAcquisition(accessToken: string, acquisitionId: string) {

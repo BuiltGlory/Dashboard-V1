@@ -22,11 +22,17 @@ import {
 } from '@/pages/admin/workflowStagePersistence'
 import { cn } from '@/lib/utils'
 import { get72hrStatus, hoursSince } from '@/utils/timer'
+import {
+  amountsRoughlyEqual,
+  parseRupeeAmount,
+  splitAmountEvenly,
+  stagePaymentBalance,
+} from '@/utils/paymentAmounts'
 import { NOTIFICATION_TEMPLATES, sendPushNotification } from '@/utils/notifications'
 
 export interface StagePaymentStageProps {
   deal: SalesDeal
-  onStageChange: (stage: SalesStage, patch?: Partial<SalesDeal>) => void
+  onStageChange: (stage: SalesStage, patch?: Partial<SalesDeal>) => boolean | Promise<boolean>
 }
 
 type PaymentMethod = 'cash' | 'neft' | 'upi' | 'cheque'
@@ -203,11 +209,12 @@ function daysOverdue(dueDate: string) {
   return Math.max(1, Math.floor((now - due) / 86400000))
 }
 
-function emptyDraftRows(count: number): DraftRow[] {
-  return Array.from({ length: count }, () => ({
+function emptyDraftRows(count: number, balance = 0): DraftRow[] {
+  const amounts = splitAmountEvenly(balance, count)
+  return Array.from({ length: count }, (_, index) => ({
     name: '',
     dueDate: '',
-    amount: '',
+    amount: amounts[index] ? String(amounts[index]) : '',
   }))
 }
 
@@ -224,10 +231,11 @@ export function StagePaymentStage({ deal, onStageChange }: StagePaymentStageProp
 
   const agreed = deal.agreedPrice ?? 0
   const token = deal.tokenAmount ?? 0
-  const balance = Math.max(0, agreed - token)
+  const balance = stagePaymentBalance(agreed, deal.tokenAmount)
+  const hasToken = token > 0
 
   const [stageCount, setStageCount] = useState<number>(4)
-  const [draftRows, setDraftRows] = useState<DraftRow[]>(() => emptyDraftRows(4))
+  const [draftRows, setDraftRows] = useState<DraftRow[]>(() => emptyDraftRows(4, stagePaymentBalance(deal.agreedPrice ?? 0, deal.tokenAmount)))
   const [plan, setPlan] = useState<Milestone[] | null>(null)
   const [editingPlan, setEditingPlan] = useState(false)
 
@@ -265,12 +273,16 @@ export function StagePaymentStage({ deal, onStageChange }: StagePaymentStageProp
     ) => {
       let msg = sendPushNotification(deal.buyerName, template, notificationId, {
         dedupeKey,
+        audience: 'buyer',
+        userId: deal.buyerUserId,
         relatedTo: { type: 'deal', id: deal.id },
       })
       if (msg.includes('recently') && window.confirm(`${msg}\n\nSend again?`)) {
         msg = sendPushNotification(deal.buyerName, template, notificationId, {
           skipDuplicateCheck: true,
           dedupeKey,
+          audience: 'buyer',
+          userId: deal.buyerUserId,
           relatedTo: { type: 'deal', id: deal.id },
         })
       }
@@ -328,18 +340,21 @@ export function StagePaymentStage({ deal, onStageChange }: StagePaymentStageProp
   }, [deal.id])
 
   const draftTotal = useMemo(
-    () =>
-      draftRows.reduce((sum, row) => {
-        const n = Number(row.amount.replace(/,/g, ''))
-        return sum + (Number.isFinite(n) ? n : 0)
-      }, 0),
+    () => draftRows.reduce((sum, row) => sum + parseRupeeAmount(row.amount), 0),
     [draftRows],
   )
 
-  const planTotalMismatch = draftTotal !== balance
+  const planTotal = useMemo(
+    () => (plan ?? []).reduce((sum, milestone) => sum + milestone.plannedAmount, 0),
+    [plan],
+  )
+
+  const planTotalMismatch = !amountsRoughlyEqual(draftTotal, balance)
+  const savedPlanMismatch = plan != null && plan.length > 0 && !amountsRoughlyEqual(planTotal, balance)
   const canCreatePlan =
     !planTotalMismatch &&
-    draftRows.every((r) => r.name.trim() && r.dueDate && Number(r.amount) > 0)
+    balance > 0 &&
+    draftRows.every((r) => r.name.trim() && r.dueDate && parseRupeeAmount(r.amount) > 0)
 
   const milestones = useMemo(() => {
     if (!plan) return []
@@ -397,13 +412,27 @@ export function StagePaymentStage({ deal, onStageChange }: StagePaymentStageProp
   const progressPct = balance > 0 ? Math.min(100, Math.round((paidReceived / balance) * 100)) : 0
   const allPaid = plan != null && plan.length > 0 && plan.every((m) => m.status === 'paid')
 
+  const advanceToDocumentation = useCallback(
+    async (collectedBalance: number) => {
+      const advanced = await onStageChange('documentation', {
+        totalPaid: token + collectedBalance,
+        tokenPaid: true,
+      })
+      if (advanced) {
+        navigate('/admin/sales/documentation')
+      }
+      return advanced
+    },
+    [navigate, onStageChange, token],
+  )
+
   const selectableMilestones = milestones.filter(
     (m) => m.status === 'pending' || m.status === 'in_progress',
   )
 
   const selectedMilestone = milestones.find((m) => m.id === selectedMilestoneId)
 
-  const payAmountNum = Number(payAmount.replace(/,/g, ''))
+  const payAmountNum = parseRupeeAmount(payAmount)
   const needsReference = payMethod === 'neft' || payMethod === 'upi'
 
   const futurePayDate = useMemo(() => {
@@ -446,7 +475,24 @@ export function StagePaymentStage({ deal, onStageChange }: StagePaymentStageProp
 
   const handleStageCountChange = (count: number) => {
     setStageCount(count)
-    setDraftRows(emptyDraftRows(count))
+    setDraftRows((prev) => {
+      const amounts = splitAmountEvenly(balance, count)
+      return Array.from({ length: count }, (_, index) => ({
+        name: prev[index]?.name ?? '',
+        dueDate: prev[index]?.dueDate ?? '',
+        amount: amounts[index] ? String(amounts[index]) : '',
+      }))
+    })
+  }
+
+  const splitDraftEvenly = () => {
+    const amounts = splitAmountEvenly(balance, draftRows.length)
+    setDraftRows((prev) =>
+      prev.map((row, index) => ({
+        ...row,
+        amount: amounts[index] ? String(amounts[index]) : '',
+      })),
+    )
   }
 
   const updateDraftRow = (index: number, field: keyof DraftRow, value: string) => {
@@ -479,12 +525,12 @@ export function StagePaymentStage({ deal, onStageChange }: StagePaymentStageProp
       index: i + 1,
       name: row.name.trim(),
       dueDate: row.dueDate,
-      plannedAmount: Number(row.amount),
+      plannedAmount: parseRupeeAmount(row.amount),
       paidAmount: null,
       status: i === 0 ? 'in_progress' : 'pending',
       proofStatus: 'none',
       proofSubmittedAt: null,
-      wrongStageProof: i === 1,
+      wrongStageProof: false,
     }))
     setPlan(created)
     setEditingPlan(false)
@@ -518,7 +564,7 @@ export function StagePaymentStage({ deal, onStageChange }: StagePaymentStageProp
     setEditingPlan(true)
     setPlanSentAt(null)
     setPlanBuyerStatus('none')
-    setDraftRows(emptyDraftRows(stageCount))
+    setDraftRows(emptyDraftRows(stageCount, balance))
     showToast('Create a new payment plan for the buyer')
   }
 
@@ -552,7 +598,7 @@ export function StagePaymentStage({ deal, onStageChange }: StagePaymentStageProp
         showToast(error instanceof Error ? error.message : 'Could not save buyer plan status'),
       )
     }
-    dispatchPush(planNotifyTemplate, 'N-10', `N-10:${deal.id}`)
+    dispatchPush(planNotifyTemplate, 'N-07', `N-07:plan:${deal.id}`)
     const tel = phoneForTel(deal.buyerPhone)
     if (sendWhatsApp) {
       window.open(
@@ -612,8 +658,8 @@ export function StagePaymentStage({ deal, onStageChange }: StagePaymentStageProp
         showToast(error instanceof Error ? error.message : 'Could not save proof verification'),
       )
     }
-    const template = NOTIFICATION_TEMPLATES.N11_MILESTONE_VERIFIED(deal.buyerName, ms.name)
-    dispatchPush(template, 'N-11', `N-11:${deal.id}:${milestoneId}`)
+    const template = NOTIFICATION_TEMPLATES.N07_PAYMENT_BUYER(deal.buyerName, deal.propertyTitle)
+    dispatchPush(template, 'N-07', `N-07:milestone:${deal.id}:${milestoneId}`)
     setRejectMilestoneId(null)
   }
 
@@ -638,12 +684,16 @@ export function StagePaymentStage({ deal, onStageChange }: StagePaymentStageProp
     void persistStagePayment(nextPlan).catch((error) =>
       showToast(error instanceof Error ? error.message : 'Could not save proof rejection'),
     )
-    const template = NOTIFICATION_TEMPLATES.N12_MILESTONE_REJECTED(
-      deal.buyerName,
-      ms.name,
-      milestoneRejectReason.trim(),
+    const template = NOTIFICATION_TEMPLATES.N07_PAYMENT_BUYER(deal.buyerName, deal.propertyTitle)
+    dispatchPush(
+      {
+        ...template,
+        title: 'Proof Needs Resubmission',
+        body: `${ms.name} proof rejected: ${milestoneRejectReason.trim()}. Please reupload.`,
+      },
+      'N-07',
+      `N-07:milestone-reject:${deal.id}:${milestoneId}`,
     )
-    dispatchPush(template, 'N-12', `N-12:${deal.id}:${milestoneId}`)
     setRejectMilestoneId(null)
     setMilestoneRejectReason('')
   }
@@ -703,6 +753,11 @@ export function StagePaymentStage({ deal, onStageChange }: StagePaymentStageProp
       setPayProofFile(null)
       setPayNotes('')
       setPartialWarn(false)
+      const allNowPaid = nextPlan.length > 0 && nextPlan.every((m) => m.status === 'paid')
+      if (allNowPaid) {
+        const collectedBalance = nextPlan.reduce((sum, m) => sum + (m.paidAmount ?? 0), 0)
+        await advanceToDocumentation(collectedBalance)
+      }
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Could not record stage payment')
     } finally {
@@ -804,6 +859,30 @@ export function StagePaymentStage({ deal, onStageChange }: StagePaymentStageProp
           <CardTitle>Stage Payment Plan</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
+          <div className="rounded-lg border border-border bg-muted/40 p-3 text-sm">
+            <div className="grid gap-2 sm:grid-cols-3">
+              <div>
+                <p className="text-xs text-muted-foreground">Agreed price</p>
+                <p className="font-medium text-foreground">{formatPrice(agreed)}</p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">Token {hasToken ? 'paid' : 'not set'}</p>
+                <p className="font-medium text-foreground">{hasToken ? formatPrice(token) : '—'}</p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground">Balance to schedule</p>
+                <p className="font-medium text-foreground">{formatPrice(balance)}</p>
+              </div>
+            </div>
+          </div>
+
+          {savedPlanMismatch && (
+            <div className="rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-900">
+              Plan total {formatPrice(planTotal)} does not match balance due {formatPrice(balance)}.
+              Edit the plan and rebalance milestone amounts.
+            </div>
+          )}
+
           {showPlanBuilder ? (
             <>
               <div>
@@ -852,19 +931,30 @@ export function StagePaymentStage({ deal, onStageChange }: StagePaymentStageProp
                         <label className="text-xs text-muted-foreground">Amount (₹)</label>
                         <input
                           type="number"
+                          min={0}
                           value={row.amount}
                           onChange={(e) => updateDraftRow(i, 'amount', e.target.value)}
                           className="mt-1 h-9 w-full rounded-md border border-border bg-input px-3 text-sm"
                         />
+                        {parseRupeeAmount(row.amount) > 0 && (
+                          <p className="mt-1 text-[11px] text-muted-foreground">
+                            {formatPrice(parseRupeeAmount(row.amount))}
+                          </p>
+                        )}
                       </div>
                     </div>
                   </div>
                 ))}
               </div>
 
-              <p className="text-sm text-muted-foreground">
-                Total: {formatPrice(draftTotal)}
-              </p>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-sm text-muted-foreground">
+                  Total: {formatPrice(draftTotal)}
+                </p>
+                <Button type="button" size="sm" variant="outline" onClick={splitDraftEvenly}>
+                  Split balance evenly
+                </Button>
+              </div>
               {planTotalMismatch ? (
                 <p className="text-sm text-red-700">
                   ❌ Must equal {formatPrice(balance)} · Difference:{' '}
@@ -885,8 +975,13 @@ export function StagePaymentStage({ deal, onStageChange }: StagePaymentStageProp
             </>
           ) : (
             <>
-              <div className="flex items-center justify-between">
-                <h4 className="font-semibold text-foreground">Payment Milestones</h4>
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <h4 className="font-semibold text-foreground">Payment Milestones</h4>
+                  <p className="text-xs text-muted-foreground">
+                    Plan total {formatPrice(planTotal)} · Balance due {formatPrice(balance)}
+                  </p>
+                </div>
                 <button
                   type="button"
                   className="text-sm text-primary hover:underline"
@@ -1023,10 +1118,10 @@ export function StagePaymentStage({ deal, onStageChange }: StagePaymentStageProp
                               />
                               {rejectPreview && (
                                 <NotificationPreview
-                                  notificationId="N-12"
+                                  notificationId="N-07"
                                   title={rejectPreview.title}
                                   body={rejectPreview.body}
-                                  deepLink={rejectPreview.deepLink}
+                                  deepLink="B-15"
                                 />
                               )}
                               <p className="text-xs text-muted-foreground">
@@ -1058,16 +1153,10 @@ export function StagePaymentStage({ deal, onStageChange }: StagePaymentStageProp
                             <div className="space-y-2">
                               {verifyPreviewMilestoneId === m.id && (
                                 <NotificationPreview
-                                  notificationId="N-11"
-                                  title={NOTIFICATION_TEMPLATES.N11_MILESTONE_VERIFIED(
-                                    deal.buyerName,
-                                    m.name,
-                                  ).title}
-                                  body={NOTIFICATION_TEMPLATES.N11_MILESTONE_VERIFIED(
-                                    deal.buyerName,
-                                    m.name,
-                                  ).body}
-                                  deepLink="B-13D Tracking Dashboard"
+                                  notificationId="N-07"
+                                  title="Milestone Verified! ✅"
+                                  body={`${m.name} has been verified. Next payment stage is now active.`}
+                                  deepLink="B-15"
                                 />
                               )}
                               <div className="flex gap-2">
@@ -1078,7 +1167,7 @@ export function StagePaymentStage({ deal, onStageChange }: StagePaymentStageProp
                                 onClick={() => verifyMilestoneProof(m.id)}
                               >
                                 {verifyPreviewMilestoneId === m.id
-                                  ? 'Confirm & Send N-11'
+                                  ? 'Confirm & Send N-07'
                                   : 'Verify milestone'}
                               </Button>
                               <Button
@@ -1466,11 +1555,9 @@ export function StagePaymentStage({ deal, onStageChange }: StagePaymentStageProp
                     type="button"
                     size="sm"
                     onClick={() => {
-                      onStageChange('documentation', {
-                        totalPaid: token + paidReceived,
-                        tokenPaid: true,
+                      void advanceToDocumentation(paidReceived).then((advanced) => {
+                        if (advanced) setShowDocConfirm(false)
                       })
-                      navigate('/admin/sales/documentation')
                     }}
                   >
                     Confirm
@@ -1554,10 +1641,10 @@ function PlanSendModal(props: {
         <div className="mt-3 space-y-1">
           <p className="text-sm font-medium">📱 Buyer will receive:</p>
           <NotificationPreview
-            notificationId="N-10"
+            notificationId="N-07"
             title={notifyTemplate.title}
             body={notifyTemplate.body}
-            deepLink={notifyTemplate.deepLink}
+            deepLink={notifyTemplate.deepLink || 'B-15'}
           />
         </div>
         {planExpired && planBuyerStatus === 'negotiating' && (

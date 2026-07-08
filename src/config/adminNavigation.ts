@@ -124,7 +124,6 @@ export const ADMIN_NAV_SECTIONS: NavSection[] = [
     defaultPath: '/admin/users/all',
     tabs: [
       { id: 'all', label: 'All Users', path: '/admin/users/all' },
-      { id: 'kyc', label: 'KYC Verification', path: '/admin/users/kyc' },
       { id: 'buyers', label: 'Buyers', path: '/admin/users/buyers' },
       { id: 'sellers', label: 'Sellers', path: '/admin/users/sellers' },
     ],
@@ -153,6 +152,7 @@ export const ADMIN_NAV_SECTIONS: NavSection[] = [
       { id: 'pricing', label: 'Pricing', path: '/admin/tools/pricing' },
       { id: 'templates', label: 'Message Templates', path: '/admin/tools/templates' },
       { id: 'bulkmessage', label: 'Bulk Message', path: '/admin/tools/bulkmessage' },
+      { id: 'push', label: 'Push Notifications', path: '/admin/tools/push' },
     ],
   },
   {

@@ -25,7 +25,7 @@ import {
 
 export interface InteriorDesignStageProps {
   deal: SalesDeal
-  onStageChange: (stage: SalesStage, patch?: Partial<SalesDeal>) => void
+  onStageChange: (stage: SalesStage, patch?: Partial<SalesDeal>) => boolean | Promise<boolean>
 }
 
 type QuoteStatus = 'pending' | 'sent' | 'accepted' | 'negotiating' | 'declined'
@@ -399,6 +399,14 @@ export function InteriorDesignStage({ deal, onStageChange }: InteriorDesignStage
     milestones.length > 0 && milestones.every((m) => m.status === 'paid')
   const workCompletedCount = workPhases.filter((p) => p.done).length
   const allWorkDone = workCompletedCount === WORK_PHASE_LABELS.length
+
+  const advanceToDocumentation = useCallback(async () => {
+    const advanced = await onStageChange('documentation')
+    if (advanced) {
+      navigate('/admin/sales/documentation')
+    }
+    return advanced
+  }, [navigate, onStageChange])
 
   const displayMilestones = useMemo(
     () =>
@@ -1429,8 +1437,9 @@ export function InteriorDesignStage({ deal, onStageChange }: InteriorDesignStage
                       type="button"
                       size="sm"
                       onClick={() => {
-                        onStageChange('documentation')
-                        navigate('/admin/sales/documentation')
+                        void advanceToDocumentation().then((advanced) => {
+                          if (advanced) setShowSkipConfirm(false)
+                        })
                       }}
                     >
                       Confirm
@@ -1465,8 +1474,9 @@ export function InteriorDesignStage({ deal, onStageChange }: InteriorDesignStage
                     type="button"
                     size="sm"
                     onClick={() => {
-                      onStageChange('documentation')
-                      navigate('/admin/sales/documentation')
+                      void advanceToDocumentation().then((advanced) => {
+                        if (advanced) setShowDocConfirm(false)
+                      })
                     }}
                   >
                     Confirm
@@ -1511,8 +1521,9 @@ export function InteriorDesignStage({ deal, onStageChange }: InteriorDesignStage
                   type="button"
                   size="sm"
                   onClick={() => {
-                    onStageChange('documentation')
-                    navigate('/admin/sales/documentation')
+                    void advanceToDocumentation().then((advanced) => {
+                      if (advanced) setShowSkipConfirm(false)
+                    })
                   }}
                 >
                   Confirm

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useLocation, useNavigate } from 'react-router'
+import { useLocation, useNavigate, useSearchParams } from 'react-router'
 import * as XLSX from 'xlsx'
 import {
   Building2,
@@ -32,6 +32,7 @@ import {
   getPropertyTypeLabel,
   getSourceLabel,
   getStatusBadgeColor,
+  normalizePropertyTypeKey,
   type Property,
   type PropertySource,
   type PropertyStatus,
@@ -43,6 +44,7 @@ import {
   bulkUploadAdminProperties,
   createAdminProperty,
   deleteAdminProperty,
+  getAdminProperty,
   getAdminPropertyTemplate,
   listAdminPropertyImportJobs,
   listAdminProperties,
@@ -145,6 +147,7 @@ const ALL_TYPES: { value: PropertyType | ''; label: string }[] = [
   { value: 'farmhouse', label: 'Farmhouse' },
   { value: 'nri', label: 'NRI' },
   { value: 'interior', label: 'Interior' },
+  { value: 'villa', label: 'Villa' },
 ]
 
 const ALL_STATUSES: { value: PropertyStatus | ''; label: string }[] = [
@@ -1453,16 +1456,119 @@ type AddFormFieldKey =
   | 'city'
   | 'address'
 
+type AddFormState = {
+  setSelectedType: (type: PropertyType | null) => void
+  setPropertyId: (value: string) => void
+  setTitle: (value: string) => void
+  setPrice: (value: string) => void
+  setDescription: (value: string) => void
+  setStatus: (value: PropertyStatus) => void
+  setPossessionMode: (value: 'ready' | 'date') => void
+  setPossessionDate: (value: string) => void
+  setTransactionType: (value: string) => void
+  setAddress: (value: string) => void
+  setLocality: (value: string) => void
+  setCity: (value: string) => void
+  setStateVal: (value: string) => void
+  setPincode: (value: string) => void
+  setLatitude: (value: string) => void
+  setLongitude: (value: string) => void
+  setAmenities: (value: string[]) => void
+  setPhotoUrls: (value: string[]) => void
+  setVideoUrl: (value: string) => void
+  setDroneImageUrl: (value: string) => void
+  setTour3dUrl: (value: string) => void
+  setFloorPlanUrl: (value: string) => void
+  setIsFeatured: (value: boolean) => void
+  setIsUpcoming: (value: boolean) => void
+  setLaunchDate: (value: string) => void
+  setIsNegotiable: (value: boolean) => void
+  setSpecs: (value: Record<string, string>) => void
+  setPricing: (value: {
+    salePricePerSqft: string
+    maintenancePerMonth: string
+    monthlyMaintenance: string
+    saleLeasePrice: string
+  }) => void
+}
+
+function applyPropertyToAddForm(property: Property, form: AddFormState) {
+  const possession = String(property.specs.possession ?? '')
+  const photoList = [...property.photos]
+  if (property.coverPhoto && !photoList.includes(property.coverPhoto)) {
+    photoList.unshift(property.coverPhoto)
+  }
+  const specEntries = Object.entries(property.specs).filter(
+    ([key, value]) =>
+      value != null &&
+      value !== '' &&
+      key !== 'transactionType' &&
+      key !== 'possession' &&
+      key !== 'pricePerSqft' &&
+      key !== 'maintenancePerMonth',
+  )
+
+  form.setSelectedType(normalizePropertyTypeKey(property.type) ?? property.type)
+  form.setPropertyId(property.referenceId)
+  form.setTitle(property.title)
+  form.setPrice(String(property.price))
+  form.setDescription(property.description)
+  form.setStatus(property.status)
+  if (property.possessionDate) {
+    form.setPossessionMode('date')
+    form.setPossessionDate(property.possessionDate.slice(0, 10))
+  } else if (possession === 'Ready to Move') {
+    form.setPossessionMode('ready')
+    form.setPossessionDate('')
+  } else {
+    form.setPossessionMode('ready')
+    form.setPossessionDate('')
+  }
+  form.setTransactionType(String(property.specs.transactionType ?? ''))
+  form.setAddress(property.address)
+  form.setLocality(property.locality)
+  form.setCity(property.city)
+  form.setStateVal(property.state)
+  form.setPincode(property.pincode)
+  form.setLatitude(property.latitude != null ? String(property.latitude) : '')
+  form.setLongitude(property.longitude != null ? String(property.longitude) : '')
+  form.setAmenities(property.amenities)
+  form.setPhotoUrls([...photoList, ...Array(10).fill('')].slice(0, 10) as string[])
+  form.setVideoUrl(property.videoUrl ?? '')
+  form.setDroneImageUrl(property.droneImageUrl ?? '')
+  form.setTour3dUrl(property.tour3dUrl ?? '')
+  form.setFloorPlanUrl(property.floorPlanUrl ?? '')
+  form.setIsFeatured(property.isFeatured)
+  form.setIsUpcoming(property.isUpcoming)
+  form.setLaunchDate(property.launchDate?.slice(0, 10) ?? '')
+  form.setIsNegotiable(property.isNegotiable)
+  form.setSpecs(Object.fromEntries(specEntries.map(([key, value]) => [key, String(value)])))
+  form.setPricing({
+    salePricePerSqft:
+      property.specs.pricePerSqft != null ? String(property.specs.pricePerSqft) : '',
+    maintenancePerMonth:
+      property.specs.maintenancePerMonth != null
+        ? String(property.specs.maintenancePerMonth)
+        : '',
+    monthlyMaintenance: '',
+    saleLeasePrice: '',
+  })
+}
+
 function AddPropertyForm({
   existingProperties,
+  editPropertyId,
   onCreated,
   onSuccess,
 }: {
   existingProperties: PropertyRow[]
+  editPropertyId?: string | null
   onCreated: (property: Property) => void
   onSuccess: (message: string) => void
 }) {
   const navigate = useNavigate()
+  const [editingRecordId, setEditingRecordId] = useState<string | null>(null)
+  const [loadingEdit, setLoadingEdit] = useState(false)
   const [selectedType, setSelectedType] = useState<PropertyType | null>(null)
   const [propertyId, setPropertyId] = useState(generatePropertyId)
   const [title, setTitle] = useState('')
@@ -1549,6 +1655,67 @@ function AddPropertyForm({
     }
   }, [])
 
+  useEffect(() => {
+    if (!editPropertyId) {
+      setEditingRecordId(null)
+      setLoadingEdit(false)
+      return
+    }
+    const session = readAdminSession()
+    if (!session?.accessToken) {
+      onSuccess('Login required to edit property')
+      return
+    }
+    let cancelled = false
+    setLoadingEdit(true)
+    getAdminProperty(session.accessToken, editPropertyId)
+      .then((property) => {
+        if (cancelled) return
+        setEditingRecordId(property.id)
+        applyPropertyToAddForm(property, {
+          setSelectedType,
+          setPropertyId,
+          setTitle,
+          setPrice,
+          setDescription,
+          setStatus,
+          setPossessionMode,
+          setPossessionDate,
+          setTransactionType,
+          setAddress,
+          setLocality,
+          setCity,
+          setStateVal,
+          setPincode,
+          setLatitude,
+          setLongitude,
+          setAmenities,
+          setPhotoUrls,
+          setVideoUrl,
+          setDroneImageUrl,
+          setTour3dUrl,
+          setFloorPlanUrl,
+          setIsFeatured,
+          setIsUpcoming,
+          setLaunchDate,
+          setIsNegotiable,
+          setSpecs,
+          setPricing,
+        })
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          onSuccess(error instanceof Error ? error.message : 'Failed to load property for editing')
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingEdit(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [editPropertyId, onSuccess])
+
   const specFields = selectedType ? getTypeSpecFields(selectedType, propertyOptionConfig) : []
   const specCompletion = useMemo(() => {
     if (!specFields.length) return { filled: 0, total: 0 }
@@ -1621,7 +1788,9 @@ function AddPropertyForm({
       setFieldError('propertyId')
       return true
     }
-    const exists = existingProperties.find((p) => p.referenceId === entered)
+    const exists = existingProperties.find(
+      (p) => p.referenceId === entered && p.id !== editingRecordId,
+    )
     if (exists) {
       setDuplicateIdMatch({ id: exists.id })
       setFieldError('propertyId', 'ID already exists')
@@ -1754,10 +1923,11 @@ function AddPropertyForm({
           return [key, numericKeys.has(key) ? Number(value) : value]
         }),
     )
+    const resolvedType = resolvePropertyTypeForSave(selectedType, specs)
     const payload: AdminPropertyPayload = {
       title: title.trim(),
       description,
-      type: selectedType,
+      type: resolvedType,
       status: finalStatus,
       source: 'manual',
       isFeatured,
@@ -1793,6 +1963,13 @@ function AddPropertyForm({
     }
 
     try {
+      if (editingRecordId) {
+        const updated = await updateAdminProperty(session.accessToken, editingRecordId, payload)
+        onCreated(updated)
+        onSuccess(asDraft ? 'Property saved as draft' : 'Property updated')
+        navigate(`/admin/properties/${editingRecordId}`)
+        return
+      }
       const created = await createAdminProperty(session.accessToken, payload)
       onCreated(created)
       onSuccess(asDraft ? 'Property saved as draft' : 'Property saved')
@@ -1808,10 +1985,20 @@ function AddPropertyForm({
 
   return (
     <div className="mx-auto max-w-[800px] space-y-6">
+      {loadingEdit ? (
+        <div className="rounded-lg border border-border bg-muted/30 px-4 py-8 text-center text-sm text-muted-foreground">
+          Loading property…
+        </div>
+      ) : (
+        <>
       <div>
-        <h2 className="text-lg font-semibold">Property Type</h2>
+        <h2 className="text-lg font-semibold">
+          {editingRecordId ? 'Edit Property' : 'Property Type'}
+        </h2>
         <p className="mt-1 text-sm text-muted-foreground">
-          Select a type — the form shows master sheet fields for that type
+          {editingRecordId
+            ? 'Update the property details below and save your changes.'
+            : 'Select a type — the form shows master sheet fields for that type'}
         </p>
         <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3">
           {TYPE_OPTIONS.map(({ type, icon: Icon }) => (
@@ -1835,6 +2022,10 @@ function AddPropertyForm({
 
       {selectedType && (
         <div className="space-y-3">
+          <div className="flex items-center gap-2 rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-sm">
+            <span className="text-muted-foreground">Selected type:</span>
+            <Badge variant="default">{getPropertyTypeLabel(selectedType)}</Badge>
+          </div>
           <FormAccordion
             title="Section 1: Basic Info"
             completion={`${basicCompletion.filled}/${basicCompletion.total} filled`}
@@ -2215,7 +2406,7 @@ function AddPropertyForm({
               disabled={!canSave || (isFeatured && isUpcoming)}
               onClick={() => handleSave(false)}
             >
-              Save Property
+              {editingRecordId ? 'Update Property' : 'Save Property'}
             </Button>
             <Button
               type="button"
@@ -2228,6 +2419,8 @@ function AddPropertyForm({
             </Button>
           </div>
         </div>
+      )}
+        </>
       )}
     </div>
   )
@@ -2278,6 +2471,32 @@ const BULK_UPLOAD_TYPE_ALIASES: Record<string, PropertyType> = {
   commercial: 'commercial',
   residential: 'residential',
   interior: 'interior',
+}
+
+const PLOT_SPEC_SIGNAL_KEYS = [
+  'plotArea',
+  'layoutName',
+  'plotNumber',
+  'plotDimension',
+  'totalPlotsInLayout',
+  'roadWidth',
+  'approvalType',
+  'cornerPlot',
+  'titleType',
+  'boundaryMarked',
+  'pattaAvailable',
+] as const
+
+function hasPlotSpecSignals(specs: Record<string, string>) {
+  return PLOT_SPEC_SIGNAL_KEYS.some((key) => (specs[key] ?? '').trim() !== '')
+}
+
+function resolvePropertyTypeForSave(
+  selectedType: PropertyType,
+  specs: Record<string, string>,
+): PropertyType {
+  if (hasPlotSpecSignals(specs)) return 'plot'
+  return normalizePropertyTypeKey(selectedType) ?? selectedType
 }
 
 const CORE_BULK_UPLOAD_TEMPLATE_HEADERS = [
@@ -2457,6 +2676,7 @@ function bulkCellText(value: unknown) {
 function normalizeBulkUploadType(value: unknown): PropertyType | '' {
   const normalized = bulkCellText(value).toLowerCase().replace(/[\s-]+/g, '_')
   return (
+    normalizePropertyTypeKey(normalized) ??
     BULK_UPLOAD_TYPE_ALIASES[normalized] ??
     (BULK_UPLOAD_PROPERTY_TYPES.has(normalized as PropertyType) ? (normalized as PropertyType) : '')
   )
@@ -2629,9 +2849,11 @@ function propertyToTemplateRow(property: Property): PropertyTemplateRow {
 }
 
 function templateRowToPayload(row: PropertyTemplateRow): Partial<AdminPropertyPayload> {
+  const rawType = templateValue(row, 'type').trim()
+  const type = normalizePropertyTypeKey(rawType) ?? (rawType as PropertyType)
   return {
     title: templateValue(row, 'title').trim(),
-    type: templateValue(row, 'type').trim() as PropertyType,
+    type,
     description: templateValue(row, 'description'),
     address: {
       line1: templateValue(row, 'address'),
@@ -3132,11 +3354,16 @@ function BulkUploadSection({
     void getDashboardOptions().then((options) => {
       if (cancelled) return
       const configured = options?.properties?.importSheets
-        ?.map((sheet) => ({
-          label: sheet.label,
-          type: sheet.type as PropertyType,
-        }))
-        .filter((sheet) => sheet.label && sheet.type)
+        ?.map((sheet) => {
+          const label = sheet.label?.trim()
+          if (!label) return null
+          const expectedType = SHEET_TYPE[label]
+          const parsedType = normalizePropertyTypeKey(sheet.type)
+          const type = expectedType ?? parsedType
+          if (!type) return null
+          return { label, type }
+        })
+        .filter((sheet): sheet is ImportSheetConfig => Boolean(sheet))
       if (!configured?.length) return
       setImportSheets(configured)
       setActiveTab((current) =>
@@ -3700,10 +3927,13 @@ function DeletedPropertiesSection({
 export function PropertiesPage() {
   const navigate = useNavigate()
   const { pathname } = useLocation()
+  const [searchParams] = useSearchParams()
   const pageTab = ROUTE_TAB_MAP[pathname] ?? 'all'
+  const editPropertyId = pageTab === 'add' ? searchParams.get('edit') : null
 
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useState('')
   const [typeFilter, setTypeFilter] = useState<PropertyType | ''>('')
   const [statusFilter, setStatusFilter] = useState<PropertyStatus | ''>('')
   const [viewMode, setViewMode] = useState<ViewMode>(readStoredView)
@@ -3728,6 +3958,11 @@ export function PropertiesPage() {
     window.setTimeout(() => setToast(null), 2800)
   }, [])
 
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedSearch(search), 300)
+    return () => window.clearTimeout(timer)
+  }, [search])
+
   const loadProperties = useCallback(async () => {
     const session = readAdminSession()
     if (!session?.accessToken) {
@@ -3738,8 +3973,17 @@ export function PropertiesPage() {
     }
     setLoading(true)
     try {
+      const listQuery = {
+        limit: 100,
+        sort: 'newest' as const,
+        ...(typeFilter ? { type: typeFilter } : {}),
+        ...(statusFilter ? { status: statusFilter } : {}),
+        ...(debouncedSearch.trim() ? { search: debouncedSearch.trim() } : {}),
+        ...(pageTab === 'featured' ? { featured: true } : {}),
+        ...(pageTab === 'upcoming' ? { upcoming: true } : {}),
+      }
       const [activeResult, deletedResult] = await Promise.all([
-        listAdminProperties(session.accessToken, { limit: 100, sort: 'newest' }),
+        listAdminProperties(session.accessToken, listQuery),
         listAdminProperties(session.accessToken, { limit: 100, sort: 'newest', deletedOnly: true }),
       ])
       setProperties([...activeResult.data, ...deletedResult.data].map(enrichProperty))
@@ -3749,7 +3993,7 @@ export function PropertiesPage() {
     } finally {
       setLoading(false)
     }
-  }, [showToast])
+  }, [debouncedSearch, pageTab, showToast, statusFilter, typeFilter])
 
   const patchProperty = useCallback(
     async (id: string, patch: Partial<PropertyRow>) => {
@@ -3758,45 +4002,71 @@ export function PropertiesPage() {
         showToast('Login required to update property')
         return
       }
-      if (patch.isFeatured === true) {
-        const target = properties.find((p) => p.id === id)
+
+      const target = properties.find((p) => p.id === id)
+      if (!target) return
+
+      if (patch.isFeatured === true && !target.isFeatured) {
         const featuredCount = properties.filter((p) => p.isFeatured).length
-        if (target && !target.isFeatured && featuredCount >= FEATURED_MAX) {
+        if (featuredCount >= FEATURED_MAX) {
           showToast('Maximum 20 featured properties reached. Remove one first.')
           return
         }
       }
+
+      const snapshot = target
+      setProperties((prev) =>
+        prev.map((p) =>
+          p.id === id ? enrichProperty({ ...p, ...patch } as Property) : p,
+        ),
+      )
+
       try {
-        const updated =
-          patch.status && Object.keys(patch).length === 1
-            ? await updateAdminPropertyStatus(session.accessToken, id, patch.status)
-            : await updateAdminProperty(session.accessToken, id, {
-                title: patch.title,
-                description: patch.description,
-                isFeatured: patch.isFeatured,
-                isUpcoming: patch.isUpcoming,
-                isVisibleOnApp: patch.isVisibleOnApp,
-                launchDate: patch.launchDate,
-                price: patch.price,
-                media:
-                  patch.photos ||
-                  patch.coverPhoto !== undefined ||
-                  patch.videoUrl !== undefined ||
-                  patch.droneImageUrl !== undefined ||
-                  patch.tour3dUrl !== undefined ||
-                  patch.floorPlanUrl !== undefined
-                    ? {
-                        photos: patch.photos,
-                        coverPhoto: patch.coverPhoto,
-                        videoUrl: patch.videoUrl,
-                        droneImageUrl: patch.droneImageUrl,
-                        tour3dUrl: patch.tour3dUrl,
-                        floorPlanUrl: patch.floorPlanUrl,
-                      }
-                    : undefined,
-              })
-        setProperties((prev) => prev.map((p) => (p.id === id ? enrichProperty(updated) : p)))
+        let updated: Property = snapshot
+        if (patch.status !== undefined && patch.status !== snapshot.status) {
+          updated = await updateAdminPropertyStatus(
+            session.accessToken,
+            id,
+            patch.status,
+          )
+        }
+        const hasPatchFields = Object.keys(patch).some(
+          (key) => key !== 'status' && key !== 'soldAt',
+        )
+        if (hasPatchFields) {
+          updated = await updateAdminProperty(session.accessToken, id, {
+            title: patch.title,
+            description: patch.description,
+            isFeatured: patch.isFeatured,
+            isUpcoming: patch.isUpcoming,
+            isVisibleOnApp: patch.isVisibleOnApp,
+            launchDate: patch.launchDate,
+            price: patch.price,
+            media:
+              patch.photos ||
+              patch.coverPhoto !== undefined ||
+              patch.videoUrl !== undefined ||
+              patch.droneImageUrl !== undefined ||
+              patch.tour3dUrl !== undefined ||
+              patch.floorPlanUrl !== undefined
+                ? {
+                    photos: patch.photos,
+                    coverPhoto: patch.coverPhoto,
+                    videoUrl: patch.videoUrl,
+                    droneImageUrl: patch.droneImageUrl,
+                    tour3dUrl: patch.tour3dUrl,
+                    floorPlanUrl: patch.floorPlanUrl,
+                  }
+                : undefined,
+          })
+        }
+        const final = enrichProperty({
+          ...updated,
+          ...(patch.soldAt !== undefined ? { soldAt: patch.soldAt } : {}),
+        })
+        setProperties((prev) => prev.map((p) => (p.id === id ? final : p)))
       } catch (error) {
+        setProperties((prev) => prev.map((p) => (p.id === id ? snapshot : p)))
         showToast(error instanceof Error ? error.message : 'Failed to update property')
       }
     },
@@ -3899,7 +4169,7 @@ export function PropertiesPage() {
 
   const handleEditProperty = useCallback(
     (id: string) => {
-      navigate(`/admin/properties/${id}`)
+      navigate(`/admin/properties/add?edit=${id}`)
     },
     [navigate],
   )
@@ -3951,19 +4221,20 @@ export function PropertiesPage() {
 
   const filtered = useMemo(() => {
     let list = tabBase
-    const q = search.trim().toLowerCase()
+    const q = debouncedSearch.trim().toLowerCase()
     if (q) {
       list = list.filter(
         (p) =>
           p.title.toLowerCase().includes(q) ||
           p.locality.toLowerCase().includes(q) ||
-          p.city.toLowerCase().includes(q),
+          p.city.toLowerCase().includes(q) ||
+          p.referenceId.toLowerCase().includes(q),
       )
     }
     if (typeFilter) list = list.filter((p) => p.type === typeFilter)
     if (statusFilter) list = list.filter((p) => p.status === statusFilter)
     return sortProperties(list)
-  }, [tabBase, search, typeFilter, statusFilter])
+  }, [tabBase, debouncedSearch, typeFilter, statusFilter])
 
   const visibleList = useMemo(
     () => filtered.slice(0, listVisibleCount),
@@ -4025,7 +4296,7 @@ export function PropertiesPage() {
   useEffect(() => {
     setListVisibleCount(listPageSize)
     setGridVisibleCount(GRID_LOAD_CHUNK)
-  }, [search, typeFilter, statusFilter, pageTab, listPageSize])
+  }, [debouncedSearch, typeFilter, statusFilter, pageTab, listPageSize])
 
   useEffect(() => {
     if (filtered.length === 0) {
@@ -4263,8 +4534,13 @@ export function PropertiesPage() {
       {pageTab === 'add' && (
         <AddPropertyForm
           existingProperties={activeProperties}
+          editPropertyId={editPropertyId}
           onCreated={(property) => {
-            setProperties((prev) => [enrichProperty(property), ...prev])
+            setProperties((prev) => {
+              const index = prev.findIndex((item) => item.id === property.id)
+              if (index === -1) return [enrichProperty(property), ...prev]
+              return prev.map((item) => (item.id === property.id ? enrichProperty(property) : item))
+            })
           }}
           onSuccess={(msg) => setToast(msg)}
         />

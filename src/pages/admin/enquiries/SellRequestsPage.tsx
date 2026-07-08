@@ -3,7 +3,6 @@ import { useNavigate } from 'react-router'
 import {
   AlertCircle,
   Building2,
-  Clock,
   Copy,
   Eye,
   FilterX,
@@ -12,8 +11,6 @@ import {
   MapPin,
   Search,
   SearchX,
-  ShieldCheck,
-  X,
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -21,7 +18,6 @@ import { Card, CardContent } from '@/components/ui/card'
 import {
   getCompletenessColor,
   listAdminSellRequests,
-  type KycStatus,
   type SellRequest,
   type SellRequestStatus,
 } from '@/api/adminEnquiries'
@@ -29,10 +25,6 @@ import { readAdminSession } from '@/api/admin'
 import { getPropertyTypeLabel } from '@/domain/properties'
 import { cn } from '@/lib/utils'
 import { ListingPreviewModal } from './ListingPreviewModal'
-
-function isSellerKycPending(req: SellRequest): boolean {
-  return req.kycStatus !== 'verified'
-}
 
 function getSellRequestRowFlags(req: SellRequest, all: SellRequest[]) {
   const phoneKey = req.phone.replace(/\D/g, '')
@@ -48,7 +40,7 @@ function getSellRequestRowFlags(req: SellRequest, all: SellRequest[]) {
   )[0]
   const duplicateOf =
     siblings.length > 0 && original.id !== req.id ? original.id : null
-  return { duplicateOf, kycPending: isSellerKycPending(req) }
+  return { duplicateOf }
 }
 
 type ViewMode = 'table' | 'card'
@@ -61,7 +53,6 @@ type StatusFilter =
   | 'changes_requested'
   | 'paused'
   | 'sold'
-  | 'drafts'
 
 const VIEW_STORAGE_KEY = 'builtglory-sell-requests-view'
 
@@ -74,7 +65,6 @@ const STATUS_FILTERS: { key: StatusFilter; label: string }[] = [
   { key: 'rejected', label: 'Rejected' },
   { key: 'paused', label: 'Paused' },
   { key: 'sold', label: 'Sold' },
-  { key: 'drafts', label: 'Drafts' },
 ]
 
 const STATUS_LABELS: Record<SellRequestStatus, string> = {
@@ -135,28 +125,6 @@ function StatusBadge({ status }: { status: SellRequestStatus }) {
     <Badge variant={s.variant} className={s.className}>
       {STATUS_LABELS[status]}
     </Badge>
-  )
-}
-
-function KycBadge({ status, compact }: { status: KycStatus; compact?: boolean }) {
-  if (status === 'verified') {
-    return (
-      <span className={cn('inline-flex items-center gap-1 text-xs font-medium text-green-700', compact && 'rounded-full bg-green-100 px-2 py-0.5')}>
-        <ShieldCheck className="size-3.5" /> Verified
-      </span>
-    )
-  }
-  if (status === 'pending') {
-    return (
-      <span className={cn('inline-flex items-center gap-1 text-xs font-medium text-orange-700', compact && 'rounded-full bg-orange-100 px-2 py-0.5')}>
-        <Clock className="size-3.5" /> KYC Pending
-      </span>
-    )
-  }
-  return (
-    <span className={cn('inline-flex items-center gap-1 text-xs font-medium text-red-700', compact && 'rounded-full bg-red-100 px-2 py-0.5')}>
-      <X className="size-3.5" /> KYC Rejected
-    </span>
   )
 }
 
@@ -234,7 +202,6 @@ function SellTableView({
             <th className="px-4 py-3">Seller</th>
             <th className="px-4 py-3">Property</th>
             <th className="px-4 py-3">Completeness</th>
-            <th className="px-4 py-3">KYC Status</th>
             <th className="px-4 py-3">Status</th>
             <th className="px-4 py-3">Submitted</th>
             <th className="px-4 py-3">Actions</th>
@@ -242,7 +209,7 @@ function SellTableView({
         </thead>
         <tbody>
           {requests.map((req) => {
-            const { duplicateOf, kycPending } = getSellRequestRowFlags(req, requests)
+            const { duplicateOf } = getSellRequestRowFlags(req, requests)
             return (
             <tr
               key={req.id}
@@ -264,12 +231,6 @@ function SellTableView({
                       {req.phone}
                       <Copy className="size-3" />
                     </button>
-                    <KycBadge status={req.kycStatus} />
-                    {kycPending && (
-                      <span className="mt-1 inline-block rounded bg-orange-100 px-2 py-0.5 text-[10px] font-medium text-orange-800">
-                        KYC Pending
-                      </span>
-                    )}
                     <p className="text-xs text-muted-foreground">{req.referenceId}</p>
                   </div>
                 </div>
@@ -319,9 +280,6 @@ function SellTableView({
                   <span>📸 {req.photosCount}</span>
                   <span>📄 {req.documentsCount}</span>
                 </p>
-              </td>
-              <td className="px-4 py-3">
-                <KycBadge status={req.kycStatus} />
               </td>
               <td className="px-4 py-3">
                 <StatusBadge status={req.status} />
@@ -401,9 +359,6 @@ function SellCardView({
             <span className="absolute left-2 top-2 rounded bg-black/60 px-2 py-0.5 text-xs text-white">
               📸 {req.photosCount}
             </span>
-            <div className="absolute bottom-2 left-2">
-              <KycBadge status={req.kycStatus} compact />
-            </div>
             <div className="absolute right-2 top-2">
               <StatusBadge status={req.status} />
             </div>
@@ -504,7 +459,7 @@ export function SellRequestsPage() {
     setLoadError(null)
     try {
       const result = await listAdminSellRequests(session.accessToken)
-      setRequests(result.data)
+      setRequests(result.data.filter((r) => !r.isDraft && r.status !== 'draft'))
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : 'Unable to load sell requests.')
       setRequests([])
@@ -536,10 +491,8 @@ export function SellRequestsPage() {
       changes_requested: 0,
       paused: 0,
       sold: 0,
-      drafts: 0,
     }
     requests.forEach((r) => {
-      if (r.isDraft || r.status === 'draft') counts.drafts += 1
       if (r.status === 'paused') counts.paused += 1
       if (r.status === 'sold') counts.sold += 1
       if (r.status === 'new') counts.new += 1
@@ -558,14 +511,12 @@ export function SellRequestsPage() {
       const matchesStatus =
         statusFilter === 'all'
           ? true
-          : statusFilter === 'drafts'
-            ? r.isDraft === true || r.status === 'draft'
-            : statusFilter === 'accepted'
-              ? r.status === 'accepted' ||
-                r.status === 'approved' ||
-                r.status === 'active' ||
-                r.status === 'negotiating'
-              : r.status === statusFilter
+          : statusFilter === 'accepted'
+            ? r.status === 'accepted' ||
+              r.status === 'approved' ||
+              r.status === 'active' ||
+              r.status === 'negotiating'
+            : r.status === statusFilter
       const matchesSearch =
         !q ||
         r.sellerName.toLowerCase().includes(q) ||

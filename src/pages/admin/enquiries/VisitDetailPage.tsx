@@ -29,6 +29,10 @@ import {
   listAdminVisits,
   updateAdminVisitStatus,
   VIRTUAL_PLATFORM_LABELS,
+  canCancelVisit,
+  canRescheduleVisit,
+  formatVisitApiError,
+  formatVisitTransitionError,
   type BuyerInterest,
   type NextAction,
   type Visit,
@@ -39,8 +43,9 @@ import {
   type VirtualPlatform,
   type SalesPerson,
 } from '@/api/adminEnquiries'
-import { readAdminSession } from '@/api/admin'
+import { formatAdminApiError, readAdminSession } from '@/api/admin'
 import { getDashboardOptions, type DashboardOptions } from '@/api/adminAppConfig'
+import { sendWorkflowEmail } from '@/api/adminWorkflow'
 import {
   CallRecordingCard,
   NriAssistanceCard,
@@ -56,7 +61,6 @@ import {
   loadMessages,
   logMessage,
   messageToActivityText,
-  openEmail,
   openWhatsApp,
   type SentMessage,
 } from '@/utils/messageLog'
@@ -336,7 +340,7 @@ export function VisitDetailPage() {
         setShowFeedbackForm(true)
       }
     } catch (error) {
-      setLoadError(error instanceof Error ? error.message : 'Unable to load visit.')
+      setLoadError(formatAdminApiError(error, 'Unable to load visit.'))
       setVisit(null)
       setAllVisits([])
       setSalesTeam([])
@@ -431,13 +435,23 @@ export function VisitDetailPage() {
       if (!visit) throw new Error('Visit not loaded')
       const session = readAdminSession()
       if (!session?.accessToken) throw new Error('Your admin session has expired. Please log in again.')
-      const updated = await updateAdminVisitStatus(session.accessToken, visit.id, {
+      await updateAdminVisitStatus(session.accessToken, visit.id, {
         status: nextStatus,
         ...extra,
       })
-      setVisit(updated)
-      setStatus(updated.status)
-      return updated
+      const fresh = await getAdminVisit(session.accessToken, visit.id)
+      setVisit(fresh)
+      setStatus(fresh.status)
+      setReminderSent(Boolean(fresh.reminderSent))
+      setCallLogs([...fresh.callLogs])
+      setNotes([...fresh.notes])
+      if (fresh.assignedAdmin && fresh.assignedAdmin !== 'Unassigned') {
+        setReassignTo(fresh.assignedAdmin)
+      }
+      const existingLink = getVisitMeetingLink(fresh) ?? ''
+      setMeetingLink(existingLink)
+      setLinkSaved(!!existingLink || fresh.virtualPlatform === 'whatsapp_video')
+      return fresh
     },
     [visit],
   )
@@ -452,6 +466,8 @@ export function VisitDetailPage() {
   )
 
   const isFinal = status === 'completed' || status === 'cancelled'
+  const canCancel = canCancelVisit(status)
+  const canReschedule = canRescheduleVisit(status)
   const showMissedAlert = useMemo(() => {
     if (!visit) return false
     if (status === 'completed' || status === 'cancelled' || status === 'missed') return false
@@ -487,7 +503,7 @@ export function VisitDetailPage() {
       await persistVisitUpdate('confirmed', { meetingLink: link, virtualPlatform: visit.virtualPlatform })
       updateStatus('confirmed')
     } catch (error) {
-      toastApi.error(error instanceof Error ? error.message : 'Could not confirm visit')
+      toastApi.error(formatAdminApiError(error, 'Could not confirm visit'))
       return
     }
     if (visit.visitType === 'virtual' && link) {
@@ -502,7 +518,8 @@ export function VisitDetailPage() {
                 ? ` Platform: ${visit.virtualPlatform.replace('_', ' ')}`
                 : ''
             }`,
-            deepLink: 'B-13 Visit Confirmation',
+            deepLink: 'B-12',
+            audience: 'buyer' as const,
           }
         : NOTIFICATION_TEMPLATES.N03_VISIT_CONFIRMED(
             visit.buyerName,
@@ -512,6 +529,7 @@ export function VisitDetailPage() {
           )
     const msg = sendPushNotification(visit.buyerName, template, 'N-03', {
       dedupeKey: `N-03:${visit.id}`,
+      audience: 'buyer',
       relatedTo: { type: 'visit', id: visit.id },
     })
     setToast(`Visit confirmed. Buyer notified via N-03. ${msg}`)
@@ -520,6 +538,11 @@ export function VisitDetailPage() {
 
   const handleCancelVisit = async () => {
     if (!visit) return
+    if (!canCancelVisit(status)) {
+      toastApi.error(formatVisitTransitionError(status, 'cancelled'))
+      setShowCancel(false)
+      return
+    }
     const reason =
       cancelReason === 'Other'
         ? cancelNotes.trim()
@@ -539,14 +562,15 @@ export function VisitDetailPage() {
         return
       }
     }
-    const template = NOTIFICATION_TEMPLATES.N05_VISIT_CANCELLED(
+    const template = NOTIFICATION_TEMPLATES.N03_VISIT_CANCELLED(
       visit.buyerName,
       visit.propertyTitle,
       reason,
     )
     if (notifyCancel) {
-      sendPushNotification(visit.buyerName, template, 'N-05', {
-        dedupeKey: `N-05:${visit.id}`,
+      sendPushNotification(visit.buyerName, template, 'N-03', {
+        dedupeKey: `N-03:cancel:${visit.id}`,
+        audience: 'buyer',
         relatedTo: { type: 'visit', id: visit.id },
       })
     }
@@ -554,7 +578,7 @@ export function VisitDetailPage() {
       await persistVisitUpdate('cancelled', { reason, cancelReason: reason })
       updateStatus('cancelled', { cancelReason: reason })
     } catch (error) {
-      toastApi.error(error instanceof Error ? error.message : 'Could not cancel visit')
+      toastApi.error(formatVisitApiError(error, status, 'cancelled', 'Could not cancel visit'))
       return
     }
     setShowCancel(false)
@@ -602,7 +626,7 @@ export function VisitDetailPage() {
       await persistVisitUpdate(status, { meetingLink: meetingLink.trim(), virtualPlatform: visit.virtualPlatform })
       persistMeetingLink(meetingLink.trim())
     } catch (error) {
-      toastApi.error(error instanceof Error ? error.message : 'Could not save meeting link')
+      toastApi.error(formatAdminApiError(error, 'Could not save meeting link'))
       return
     }
     setLinkSaved(true)
@@ -625,7 +649,7 @@ export function VisitDetailPage() {
       await persistVisitUpdate(status, { meetingLink: meetingLink.trim(), virtualPlatform: visit.virtualPlatform })
       persistMeetingLink(meetingLink.trim())
     } catch (error) {
-      toastApi.error(error instanceof Error ? error.message : 'Could not update meeting link')
+      toastApi.error(formatAdminApiError(error, 'Could not update meeting link'))
       return
     }
     setLinkSaved(true)
@@ -642,7 +666,7 @@ export function VisitDetailPage() {
     try {
       await persistVisitUpdate(status, { meetingLink: null, virtualPlatform: null })
     } catch (error) {
-      toastApi.error(error instanceof Error ? error.message : 'Could not remove meeting link')
+      toastApi.error(formatAdminApiError(error, 'Could not remove meeting link'))
       return
     }
     setMeetingLink('')
@@ -733,7 +757,7 @@ export function VisitDetailPage() {
         },
       })
     } catch (error) {
-      toastApi.error(error instanceof Error ? error.message : 'Could not record call')
+      toastApi.error(formatAdminApiError(error, 'Could not record call'))
       return
     }
     setVisit((prev) =>
@@ -767,15 +791,17 @@ export function VisitDetailPage() {
         ? {
             title: 'Virtual Visit Reminder 🔔',
             body: `Reminder: Your virtual visit tomorrow at ${visit.visitTime}. Join: ${link}`,
-            deepLink: 'B-13 Visit Confirmation',
+            deepLink: 'B-12',
+            audience: 'buyer' as const,
           }
-        : NOTIFICATION_TEMPLATES.N04_VISIT_REMINDER(
+        : NOTIFICATION_TEMPLATES.N03_VISIT_REMINDER(
             visit.buyerName,
             visit.propertyTitle,
             visit.visitTime,
           )
-    sendPushNotification(visit.buyerName, template, 'N-04', {
-      dedupeKey: `N-04:${visit.id}:${new Date().toISOString().split('T')[0]}`,
+    sendPushNotification(visit.buyerName, template, 'N-03', {
+      dedupeKey: `N-03:reminder:${visit.id}:${new Date().toISOString().split('T')[0]}`,
+      audience: 'buyer',
       userId: visit.buyerUserId,
       relatedTo: { type: 'visit', id: visit.id },
     })
@@ -783,10 +809,10 @@ export function VisitDetailPage() {
       await persistVisitUpdate(status, { reminderSent: true })
       setReminderSent(true)
     } catch (error) {
-      toastApi.error(error instanceof Error ? error.message : 'Could not save reminder status')
+      toastApi.error(formatAdminApiError(error, 'Could not save reminder status'))
       return
     }
-    setToast('Visit reminder sent (N-04)')
+    setToast('Visit reminder sent (N-03)')
   }
 
   const applyReschedule = async (
@@ -815,7 +841,7 @@ export function VisitDetailPage() {
         reason: data.reason,
       })
     } catch (error) {
-      toastApi.error(error instanceof Error ? error.message : 'Could not reschedule visit')
+      toastApi.error(formatVisitApiError(error, status, 'rescheduled', 'Could not reschedule visit'))
       return
     }
     setVisit((prev) =>
@@ -860,7 +886,7 @@ export function VisitDetailPage() {
       try {
         await persistVisitUpdate('completed', { feedback: visit.feedback })
       } catch (error) {
-        toastApi.error(error instanceof Error ? error.message : 'Could not mark visit completed')
+        toastApi.error(formatVisitApiError(error, status, 'completed', 'Could not mark visit completed'))
         return
       }
     }
@@ -879,7 +905,7 @@ export function VisitDetailPage() {
     try {
       await persistVisitUpdate('completed', { feedback })
     } catch (error) {
-      toastApi.error(error instanceof Error ? error.message : 'Could not save feedback')
+      toastApi.error(formatAdminApiError(error, 'Could not save feedback'))
       return
     }
     setVisit((prev) => (prev ? { ...prev, feedback } : prev))
@@ -998,7 +1024,7 @@ export function VisitDetailPage() {
                   visit.visitDate,
                   visit.visitTime,
                 ).body}
-                deepLink="B-13 Visit Confirmation"
+                deepLink="B-12"
               />
               <div className="mt-4 flex gap-2">
                 <Button className="flex-1" onClick={() => void handleConfirm()}>
@@ -1038,8 +1064,8 @@ export function VisitDetailPage() {
             className="mt-2 w-full rounded-md border border-border bg-input px-3 py-2 text-sm"
           />
           <NotificationPreview
-            notificationId="N-05"
-            title={NOTIFICATION_TEMPLATES.N05_VISIT_CANCELLED(
+            notificationId="N-03"
+            title={NOTIFICATION_TEMPLATES.N03_VISIT_CANCELLED(
               visit.buyerName,
               visit.propertyTitle,
               cancelReason === 'Other'
@@ -1048,7 +1074,7 @@ export function VisitDetailPage() {
                   ? `${cancelReason}: ${cancelNotes}`
                   : cancelReason,
             ).title}
-            body={NOTIFICATION_TEMPLATES.N05_VISIT_CANCELLED(
+            body={NOTIFICATION_TEMPLATES.N03_VISIT_CANCELLED(
               visit.buyerName,
               visit.propertyTitle,
               cancelReason === 'Other'
@@ -1057,7 +1083,7 @@ export function VisitDetailPage() {
                   ? `${cancelReason}: ${cancelNotes}`
                   : cancelReason,
             ).body}
-            deepLink="B-12 Schedule Visit"
+            deepLink="B-12"
           />
           <label className="mt-3 flex items-center gap-2 text-sm">
             <input type="checkbox" checked={notifyCancel} onChange={(e) => setNotifyCancel(e.target.checked)} />
@@ -1190,7 +1216,7 @@ export function VisitDetailPage() {
                   updateStatus('missed')
                   addActivity('Buyer did not show up', 'status')
                 })
-                .catch((error) => toastApi.error(error instanceof Error ? error.message : 'Could not mark missed'))
+                .catch((error) => toastApi.error(formatVisitApiError(error, status, 'missed', 'Could not mark missed')))
             }}
           >
             Mark as Missed
@@ -1260,18 +1286,21 @@ export function VisitDetailPage() {
             >
               <Mail className="size-4" /> Email
             </Button>
-            <Button variant="outline" size="sm" disabled={isFinal} onClick={() => setShowReschedule(true)}>
-              Reschedule
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              className="border-destructive text-destructive"
-              disabled={isFinal}
-              onClick={() => setShowCancel(true)}
-            >
-              Cancel
-            </Button>
+            {canReschedule && (
+              <Button variant="outline" size="sm" onClick={() => setShowReschedule(true)}>
+                Reschedule
+              </Button>
+            )}
+            {canCancel && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="border-destructive text-destructive"
+                onClick={() => setShowCancel(true)}
+              >
+                Cancel
+              </Button>
+            )}
           </div>
         </div>
       </header>
@@ -1574,7 +1603,7 @@ export function VisitDetailPage() {
                       addActivity('NRI assistance checklist saved', 'checklist')
                       toastApi.success('Checklist saved')
                     })
-                    .catch((error) => toastApi.error(error instanceof Error ? error.message : 'Could not save checklist'))
+                    .catch((error) => toastApi.error(formatAdminApiError(error, 'Could not save checklist')))
                 }}
                 onSaveNotes={() => {
                   const notesValue = nriAssistanceNotes.trim() || null
@@ -1586,7 +1615,7 @@ export function VisitDetailPage() {
                       addActivity('NRI assistance notes saved', 'note')
                       toastApi.success('Notes saved')
                     })
-                    .catch((error) => toastApi.error(error instanceof Error ? error.message : 'Could not save notes'))
+                    .catch((error) => toastApi.error(formatAdminApiError(error, 'Could not save notes')))
                 }}
               />
             </>
@@ -1727,7 +1756,7 @@ export function VisitDetailPage() {
                   addActivity(`Call logged — ${callOutcome}`, 'call')
                   setShowCallForm(false)
                 })
-                .catch((error) => toastApi.error(error instanceof Error ? error.message : 'Could not save call log'))
+                .catch((error) => toastApi.error(formatAdminApiError(error, 'Could not save call log')))
             }}
           />
 
@@ -1747,7 +1776,7 @@ export function VisitDetailPage() {
                   setNoteText('')
                   setShowNoteForm(false)
                 })
-                .catch((error) => toastApi.error(error instanceof Error ? error.message : 'Could not save note'))
+                .catch((error) => toastApi.error(formatAdminApiError(error, 'Could not save note')))
             }}
             onDelete={(nid) => {
               const nextNotes = notes.filter((n) => n.id !== nid)
@@ -1755,7 +1784,7 @@ export function VisitDetailPage() {
                 visitNotes: nextNotes.map((note) => ({ text: note.text, createdAt: note.at })),
               })
                 .then((updated) => setNotes(updated.notes))
-                .catch((error) => toastApi.error(error instanceof Error ? error.message : 'Could not delete note'))
+                .catch((error) => toastApi.error(formatAdminApiError(error, 'Could not delete note')))
             }}
           />
         </div>
@@ -1963,7 +1992,7 @@ export function VisitDetailPage() {
                       openWhatsApp(visit.buyerPhone, msg)
                       toastApi.success(`Visit reassigned to ${assignee?.name ?? 'selected assignee'}`)
                     } catch (error) {
-                      toastApi.error(error instanceof Error ? error.message : 'Could not reassign visit')
+                      toastApi.error(formatAdminApiError(error, 'Could not reassign visit'))
                     }
                   }}
                 >
@@ -1998,23 +2027,26 @@ export function VisitDetailPage() {
                         updateStatus('missed')
                         addActivity('Marked as missed')
                       })
-                      .catch((error) => toastApi.error(error instanceof Error ? error.message : 'Could not mark missed'))
+                      .catch((error) => toastApi.error(formatVisitApiError(error, status, 'missed', 'Could not mark missed')))
                   }}
                 >
                   ⚠️ Mark as Missed
                 </Button>
               )}
-              <Button variant="outline" className="w-full" disabled={isFinal} onClick={() => setShowReschedule(true)}>
-                🔄 Reschedule Visit
-              </Button>
-              <Button
-                variant="outline"
-                className="w-full border-destructive text-destructive"
-                disabled={isFinal}
-                onClick={() => setShowCancel(true)}
-              >
-                ❌ Cancel Visit
-              </Button>
+              {canReschedule && (
+                <Button variant="outline" className="w-full" onClick={() => setShowReschedule(true)}>
+                  🔄 Reschedule Visit
+                </Button>
+              )}
+              {canCancel && (
+                <Button
+                  variant="outline"
+                  className="w-full border-destructive text-destructive"
+                  onClick={() => setShowCancel(true)}
+                >
+                  ❌ Cancel Visit
+                </Button>
+              )}
             </CardContent>
           </Card>
         </div>
@@ -2094,19 +2126,29 @@ export function VisitDetailPage() {
             </Button>
             <Button
               className="flex-1"
-              disabled={!visit.buyerEmail}
+              disabled={!visit.buyerEmail || !emailSubject.trim() || !emailBody.trim()}
               onClick={() => {
-                if (!visit.buyerEmail) return
-                logVisitMessage({
-                  channel: 'email',
-                  to: visit.buyerEmail,
-                  toName: visit.buyerName,
-                  subject: emailSubject,
-                  message: emailBody,
-                })
-                openEmail(visit.buyerEmail, emailSubject, emailBody)
-                setEmailOpen(false)
-                setToast('Email sent')
+                void (async () => {
+                  if (!visit.buyerEmail) return
+                  const session = readAdminSession()
+                  if (!session?.accessToken) {
+                    toastApi.error('Your admin session has expired. Please log in again.')
+                    return
+                  }
+                  try {
+                    await sendWorkflowEmail(session.accessToken, 'visit', visit.id, {
+                      to: visit.buyerEmail,
+                      subject: emailSubject.trim(),
+                      body: emailBody.trim(),
+                      summary: `Email sent to ${visit.buyerName}`,
+                    })
+                    refreshSentMessages()
+                    setEmailOpen(false)
+                    toastApi.success('Email sent successfully')
+                  } catch (error) {
+                    toastApi.error(formatAdminApiError(error, 'Could not send email'))
+                  }
+                })()
               }}
             >
               Send

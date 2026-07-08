@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { ChevronDown, ChevronUp } from 'lucide-react'
 import { formatPrice } from '@/api/adminAcquisitions'
+import { normalizePropertyTypeKey } from '@/domain/properties'
 import { cn } from '@/lib/utils'
 
 export type PropertyFieldGroup = {
@@ -522,10 +523,130 @@ export const PROPERTY_TYPE_FIELDS: Record<
   },
 }
 export function normalizePropertyType(propertyType: string): string | null {
-  const key = propertyType.toLowerCase().trim()
-  if (key === 'villa' || key === 'house') return 'residential'
+  const key = normalizePropertyTypeKey(propertyType)
+  if (!key) return null
+  if (key === 'villa') return 'residential'
   if (key in PROPERTY_TYPE_FIELDS) return key
   return null
+}
+
+const SELL_SPEC_ALIAS_GROUPS: string[][] = [
+  ['bhkConfig', 'bhk'],
+  ['builtUp', 'builtUpArea'],
+  ['carpetArea', 'carpet'],
+  ['floorNumber', 'floor'],
+  ['unitNumber', 'unitNo', 'unit'],
+  ['propertyAge', 'age'],
+  ['reraNumber', 'rera'],
+  ['plotArea', 'area', 'totalArea'],
+  ['totalFloors', 'floors'],
+  ['furnishing', 'furnish'],
+]
+
+function firstNonEmptyValue(
+  source: Record<string, unknown>,
+  keys: string[],
+): unknown {
+  for (const key of keys) {
+    const value = source[key]
+    if (!isFieldEmpty(value)) return value
+  }
+  return undefined
+}
+
+function formatBhkConfig(value: unknown): string {
+  const raw = String(value).trim()
+  if (!raw) return raw
+  return raw.toLowerCase().includes('bhk') ? raw : `${raw} BHK`
+}
+
+/** Maps seller-app `specifications` keys to dashboard field-config keys. */
+export function normalizeSellPropertyDetails(
+  specifications?: Record<string, unknown> | null,
+  extras?: Record<string, unknown> | null,
+): Record<string, unknown> {
+  const raw = { ...(specifications ?? {}), ...(extras ?? {}) }
+  const details: Record<string, unknown> = { ...raw }
+
+  for (const group of SELL_SPEC_ALIAS_GROUPS) {
+    const value = firstNonEmptyValue(raw, group)
+    if (isFieldEmpty(value)) continue
+    for (const key of group) {
+      if (isFieldEmpty(details[key])) {
+        details[key] = key === 'bhkConfig' ? formatBhkConfig(value) : value
+      }
+    }
+  }
+
+  return details
+}
+
+export type SellCompletenessInput = {
+  propertyType?: string
+  specifications?: Record<string, unknown> | null
+  ownershipType?: string
+  possessionStatus?: string
+  loanOnProperty?: boolean
+  askingPrice?: number | string
+  description?: string
+  photos?: string[]
+  photosCount?: number
+  documents?: Array<{ status?: string; fileUrl?: string }>
+  documentsCount?: number
+  amenities?: string[]
+  address?: {
+    city?: string
+    locality?: string
+    pincode?: string
+    street?: string
+  }
+  location?: string
+}
+
+export function computeSellCompletenessPercent(input: SellCompletenessInput): number {
+  const propertyDetails = normalizeSellPropertyDetails(input.specifications, {
+    ownershipType: input.ownershipType,
+    possessionStatus: input.possessionStatus,
+    loanOnProperty: input.loanOnProperty,
+  })
+  const fieldStats = countMissingTypeFields(input.propertyType ?? '', propertyDetails)
+  const hasPropertyDetails =
+    fieldStats.total > 0
+      ? fieldStats.missing < fieldStats.total
+      : Object.values(propertyDetails).some((value) => !isFieldEmpty(value))
+
+  const photoCount = Math.max(
+    input.photosCount ?? 0,
+    input.photos?.length ?? 0,
+    (input.documents ?? []).filter(
+      (doc) => doc.fileUrl && !['rejected', 'missing'].includes(String(doc.status ?? '')),
+    ).length,
+  )
+  const uploadedDocs = (input.documents ?? []).filter(
+    (doc) => doc.status === 'uploaded' || Boolean(doc.fileUrl),
+  ).length
+  const hasDocuments = uploadedDocs > 0 || (input.documentsCount ?? 0) > 0
+  const askingPrice =
+    typeof input.askingPrice === 'number'
+      ? input.askingPrice
+      : Number(String(input.askingPrice ?? '').replace(/[^\d]/g, ''))
+  const hasLocation = Boolean(
+    input.address?.city &&
+      input.address?.pincode &&
+      (input.address.locality || input.address.street || input.location),
+  )
+
+  const checks = [
+    hasPropertyDetails,
+    photoCount > 0,
+    Number.isFinite(askingPrice) && askingPrice > 0,
+    hasDocuments,
+    Boolean(input.description?.trim()),
+    hasLocation,
+    (input.amenities ?? []).length > 0,
+  ]
+
+  return Math.round((checks.filter(Boolean).length / checks.length) * 100)
 }
 
 export function formatFieldLabel(key: string): string {

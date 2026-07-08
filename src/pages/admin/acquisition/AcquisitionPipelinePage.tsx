@@ -126,21 +126,15 @@ function EmptyAcquisitions({ stage }: { stage: AcquisitionStage | null }) {
       <p className="text-sm font-medium text-foreground">
         {stageLabel ? `No ${stageLabel} properties` : 'No acquisitions'}
       </p>
-      {stageLabel && (
+      {stageLabel ? (
         <p className="text-sm text-muted-foreground">Properties in this stage will appear here</p>
+      ) : (
+        <p className="text-sm text-muted-foreground">
+          Accepted sell requests and submitted listings will appear here automatically.
+        </p>
       )}
     </div>
   )
-}
-
-function KycDot({ status }: { status: Acquisition['sellerKycStatus'] }) {
-  const color =
-    status === 'verified'
-      ? 'bg-green-500'
-      : status === 'pending'
-        ? 'bg-orange-500'
-        : 'bg-red-500'
-  return <span className={cn('size-2 shrink-0 rounded-full', color)} title={`KYC ${status}`} />
 }
 
 function DaysInStageText({ days }: { days: number }) {
@@ -408,7 +402,6 @@ function AcquisitionListTable({
                     <div className="min-w-0">
                       <div className="flex items-center gap-1.5">
                         <p className="truncate text-sm font-medium">{item.sellerName}</p>
-                        <KycDot status={item.sellerKycStatus} />
                       </div>
                       <p className="truncate text-xs text-muted-foreground">{item.sellerPhone}</p>
                     </div>
@@ -525,7 +518,10 @@ export function AcquisitionPipelinePage() {
     setLoading(true)
     setLoadError(null)
     try {
-      const result = await listAdminAcquisitions(session.accessToken)
+      const result = await listAdminAcquisitions(session.accessToken, {
+        limit: 100,
+        sort: 'newest',
+      })
       setAcquisitions(result.data)
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : 'Unable to load acquisitions.')
@@ -540,7 +536,7 @@ export function AcquisitionPipelinePage() {
       void loadAcquisitions()
     }, 0)
     return () => clearTimeout(t)
-  }, [loadAcquisitions])
+  }, [loadAcquisitions, pathname])
 
   const stageCounts = useMemo(() => getStageCounts(acquisitions), [acquisitions])
 

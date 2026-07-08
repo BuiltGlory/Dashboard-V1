@@ -26,16 +26,16 @@ import {
   type TicketPriority,
   type TicketStatus,
 } from '@/api/adminSupport'
-import { bindToast, copyText, handleCall, handleEmail, openWhatsApp } from '@/utils/adminActions'
+import { bindToast, copyText, handleCall, handleEmail, isValidPhone, openWhatsApp } from '@/utils/adminActions'
 import {
-  getKycStatusColor,
-  getKycStatusLabel,
   getRoleLabel,
   getUserTypeBadgeColor,
+  getAdminUser,
   listAdminUsers,
   type User,
 } from '@/api/adminUsers'
 import { readAdminSession } from '@/api/admin'
+import { hasPermission } from '@/config/adminPermissions'
 import { getAdminSalesTeam, type SalesPerson } from '@/api/adminEnquiries'
 import { createWorkflowLog, listWorkflowLogs, type WorkflowLog } from '@/api/adminWorkflow'
 import {
@@ -248,12 +248,24 @@ export function SupportTicketDetailPage() {
         getAdminSalesTeam(session.accessToken).catch(() => [] as SalesPerson[]),
         listAdminSupportTickets(session.accessToken).catch(() => ({ data: [] as SupportTicket[] })),
       ])
+      let nextUsers = userResult.data
+      const hasLinkedUser = nextUsers.some(
+        (user) => user.id === loadedTicket.userId || user.referenceId === loadedTicket.userId,
+      )
+      if (!hasLinkedUser && loadedTicket.userId) {
+        try {
+          const linkedUser = await getAdminUser(session.accessToken, loadedTicket.userId)
+          nextUsers = [...nextUsers, linkedUser]
+        } catch {
+          // Ticket can still render without the linked user profile.
+        }
+      }
       const [callResult, noteResult] = await Promise.all([
         listWorkflowLogs(session.accessToken, 'ticket', loadedTicket.id, 'call').catch(() => ({ data: [] as WorkflowLog[] })),
         listWorkflowLogs(session.accessToken, 'ticket', loadedTicket.id, 'note').catch(() => ({ data: [] as WorkflowLog[] })),
       ])
       setTicket(loadedTicket)
-      setUsers(userResult.data)
+      setUsers(nextUsers)
       setSalesTeam(team)
       setCallLogs(callResult.data.map(workflowLogToCall))
       setNotes(noteResult.data.map(workflowLogToNote))
@@ -297,6 +309,10 @@ export function SupportTicketDetailPage() {
     () => (ticket ? users.find((u) => u.referenceId === ticket.userId || u.id === ticket.userId) : undefined),
     [ticket, users],
   )
+
+  const canWrite = useMemo(() => hasPermission(readAdminSession(), 'support.write'), [])
+  const contactPhone = linkedUser?.phone ?? ticket?.phone ?? ''
+  const hasContactPhone = isValidPhone(contactPhone)
 
   const isClosed = ticket?.status === 'closed'
   const overdue = ticket ? isTicketOverdue(ticket) : false
@@ -396,24 +412,71 @@ export function SupportTicketDetailPage() {
       patch: Parameters<typeof updateAdminSupportTicket>[2],
       successMessage?: string,
     ) => {
-      if (!ticket) return
+      if (!ticket || !canWrite) {
+        setToast('You do not have permission to update support tickets.')
+        return
+      }
       const updated = await withSession((accessToken) =>
         updateAdminSupportTicket(accessToken, ticket.id, patch),
       )
       replaceTicket(updated)
       if (successMessage) setToast(successMessage)
     },
-    [ticket, replaceTicket, withSession],
+    [ticket, replaceTicket, withSession, canWrite],
+  )
+
+  const handleStatusChange = useCallback(
+    (nextStatus: TicketStatus) => {
+      if (!ticket || isClosed) return
+      if (nextStatus === ticket.status) return
+      if (nextStatus === 'resolved') {
+        if (ticket.responses.length === 0) {
+          setToast('Add a response before resolving')
+          return
+        }
+        void updateTicket(
+          {
+            status: 'resolved',
+            resolutionResponse: ticket.responses.at(-1)?.message ?? 'Resolved by admin',
+          },
+          'Status updated',
+        )
+        return
+      }
+      void updateTicket({ status: nextStatus }, 'Status updated')
+    },
+    [ticket, isClosed, updateTicket],
   )
 
   const handleSendReply = async () => {
-    if (!ticket || !replyText.trim() || isClosed || actionSaving) return
+    if (!ticket || !replyText.trim() || isClosed || actionSaving || !canWrite) return
     const message = replyText.trim()
     const socket = socketRef.current
     if (socket?.connected) {
       setActionSaving(true)
-      socket.emit('support:send', { ticketId: ticket.id, message }, (payload) => {
+      let settled = false
+      const finish = () => {
+        if (settled) return
+        settled = true
         setActionSaving(false)
+      }
+      const timeout = window.setTimeout(() => {
+        finish()
+        setToast('Realtime reply timed out. Retrying over HTTP.')
+        void withSession((accessToken) =>
+          addAdminSupportTicketResponse(accessToken, ticket.id, { message }),
+        )
+          .then((updated) => {
+            replaceTicket(updated)
+            setReplyText('')
+            setShowTemplates(false)
+            setToast('Reply sent')
+          })
+          .catch(() => undefined)
+      }, 15000)
+      socket.emit('support:send', { ticketId: ticket.id, message }, (payload) => {
+        window.clearTimeout(timeout)
+        finish()
         const normalized = normalizeSupportTicketAck(payload)
         if (normalized.ok) {
           replaceTicket(normalized.ticket)
@@ -515,8 +578,11 @@ export function SupportTicketDetailPage() {
   }
 
   const handleCopyPhone = () => {
-    if (!ticket) return
-    void copyText(ticket.phone, toastApi)
+    if (!contactPhone) {
+      setToast('No phone number available')
+      return
+    }
+    void copyText(contactPhone, toastApi)
   }
 
   if (loading) {
@@ -563,6 +629,7 @@ export function SupportTicketDetailPage() {
 
   const userEmail = linkedUser?.email ?? '—'
   const profilePath = `/admin/users/${linkedUser?.id ?? ticket.userId}`
+  const writeDisabled = isClosed || actionSaving || !canWrite
 
   return (
     <div className="mx-auto max-w-[1000px] px-4 py-6">
@@ -620,8 +687,9 @@ export function SupportTicketDetailPage() {
           type="button"
           size="sm"
           variant="outline"
-          disabled={isClosed}
-          onClick={() => handleCall(ticket.phone)}
+          disabled={isClosed || !hasContactPhone}
+          title={!hasContactPhone ? 'No phone number available' : undefined}
+          onClick={() => handleCall(contactPhone, toastApi)}
         >
           📞 Call User
         </Button>
@@ -629,8 +697,9 @@ export function SupportTicketDetailPage() {
           type="button"
           size="sm"
           variant="outline"
-          disabled={isClosed}
-          onClick={() => openWhatsApp(ticket.phone)}
+          disabled={isClosed || !hasContactPhone}
+          title={!hasContactPhone ? 'No phone number available' : undefined}
+          onClick={() => openWhatsApp(contactPhone, ticket.userName, toastApi)}
         >
           💬 WhatsApp
         </Button>
@@ -646,9 +715,9 @@ export function SupportTicketDetailPage() {
           📧 Email
         </Button>
         <select
-          disabled={isClosed || actionSaving}
+          disabled={writeDisabled}
           value={ticket.status}
-          onChange={(e) => void updateTicket({ status: e.target.value as TicketStatus }, 'Status updated')}
+          onChange={(e) => handleStatusChange(e.target.value as TicketStatus)}
           className="h-8 rounded-md border border-border bg-card px-2 text-sm"
         >
           <option value="open">Open</option>
@@ -657,7 +726,7 @@ export function SupportTicketDetailPage() {
           <option value="closed">Closed</option>
         </select>
         <select
-          disabled={isClosed || actionSaving}
+          disabled={writeDisabled}
           value={ticket.priority}
           onChange={(e) => void updateTicket({ priority: e.target.value as TicketPriority }, 'Priority updated')}
           className="h-8 rounded-md border border-border bg-card px-2 text-sm"
@@ -976,7 +1045,7 @@ export function SupportTicketDetailPage() {
                 <p className="font-medium">{ticket.userName}</p>
               </div>
               <div className="flex items-center justify-between gap-2">
-                <span className="text-muted-foreground">{ticket.phone}</span>
+                <span className="text-muted-foreground">{contactPhone || '—'}</span>
                 <Button type="button" size="sm" variant="ghost" onClick={handleCopyPhone}>
                   Copy
                 </Button>
@@ -991,14 +1060,6 @@ export function SupportTicketDetailPage() {
                     )}
                   >
                     {linkedUser.userType.toUpperCase()}
-                  </span>
-                  <span
-                    className={cn(
-                      'ml-1 inline-block rounded-full px-2 py-0.5 text-xs font-medium',
-                      getKycStatusColor(linkedUser.kycStatus),
-                    )}
-                  >
-                    KYC: {getKycStatusLabel(linkedUser.kycStatus)}
                   </span>
                   <p className="text-xs text-muted-foreground">{getRoleLabel(linkedUser.role)}</p>
                 </>
@@ -1033,7 +1094,7 @@ export function SupportTicketDetailPage() {
               <label className="block">
                 <span className="text-xs text-muted-foreground">Assigned To</span>
                 <select
-                  disabled={isClosed || actionSaving}
+                  disabled={writeDisabled}
                   value={ticket.assignedTo ?? ''}
                   onChange={(e) => {
                     if (!e.target.value) {
@@ -1055,7 +1116,7 @@ export function SupportTicketDetailPage() {
               <label className="block">
                 <span className="text-xs text-muted-foreground">Priority</span>
                 <select
-                  disabled={isClosed || actionSaving}
+                  disabled={writeDisabled}
                   value={ticket.priority}
                   onChange={(e) => void updateTicket({ priority: e.target.value as TicketPriority }, 'Priority updated')}
                   className="mt-1 h-9 w-full rounded-md border border-border bg-card px-2 text-sm"
@@ -1081,7 +1142,7 @@ export function SupportTicketDetailPage() {
               <Button
                 type="button"
                 className="w-full bg-green-600 hover:bg-green-700"
-                disabled={isClosed || actionSaving}
+                disabled={writeDisabled}
                 onClick={() => setShowResolveConfirm(true)}
               >
                 ✅ Mark Resolved
@@ -1089,7 +1150,7 @@ export function SupportTicketDetailPage() {
               <label className="block text-sm">
                 <span className="mb-1 block text-muted-foreground">🔄 Reassign</span>
                 <select
-                  disabled={isClosed || actionSaving}
+                  disabled={writeDisabled}
                   value={ticket.assignedTo ?? ''}
                   onChange={(e) => {
                     if (!e.target.value) {
@@ -1113,7 +1174,7 @@ export function SupportTicketDetailPage() {
                 type="button"
                 variant="outline"
                 className="w-full border-orange-300 text-orange-700"
-                disabled={isClosed || actionSaving}
+                disabled={writeDisabled}
                 onClick={() => setShowEscalate(true)}
               >
                 ⬆️ Escalate
@@ -1122,7 +1183,7 @@ export function SupportTicketDetailPage() {
                 type="button"
                 variant="outline"
                 className="w-full"
-                disabled={isClosed || actionSaving}
+                disabled={writeDisabled}
                 onClick={() => setShowCloseConfirm(true)}
               >
                 🔒 Close Ticket

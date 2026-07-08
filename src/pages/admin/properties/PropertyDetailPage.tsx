@@ -48,6 +48,7 @@ import {
   releaseConcurrentEditing,
 } from '@/utils/edgeCases'
 import { NOTIFICATION_TEMPLATES, sendPushNotification } from '@/utils/notifications'
+import { getCustomerPropertyUrl } from '@/lib/customerApp'
 
 function isImageUrl(url: string) {
   return /\.(jpe?g|png|gif|webp|svg)(\?.*)?$/i.test(url)
@@ -379,15 +380,15 @@ export function PropertyDetailPage() {
     setTimeout(() => setToast(null), 2500)
   }, [])
 
-  const updateProperty = useCallback(async (patch: Partial<Property>) => {
+  const updateProperty = useCallback(async (patch: Partial<Property>): Promise<boolean> => {
     const session = readAdminSession()
     if (!property || !session?.accessToken) {
       showToast('Login required to update property')
-      return
+      return false
     }
     try {
       let updated = property
-      if (patch.status) {
+      if (patch.status && patch.status !== property.status) {
         updated = await updateAdminPropertyStatus(session.accessToken, property.id, patch.status)
       }
       const hasPatchFields = Object.keys(patch).some((key) => key !== 'status' && key !== 'soldAt')
@@ -417,11 +418,46 @@ export function PropertyDetailPage() {
               : undefined,
         })
       }
-      setProperty(updated)
+      setProperty({
+        ...updated,
+        ...(patch.soldAt !== undefined ? { soldAt: patch.soldAt } : {}),
+      })
+      return true
     } catch (error) {
       showToast(error instanceof Error ? error.message : 'Failed to update property')
+      return false
     }
   }, [property, showToast])
+
+  const openEditForm = useCallback(() => {
+    if (!property) return
+    navigate(`/admin/properties/add?edit=${property.id}`)
+  }, [navigate, property])
+
+  const openAppPreview = useCallback(() => {
+    if (!property) return
+    setShowPreview(true)
+  }, [property])
+
+  const openPropertyInCustomerApp = useCallback(() => {
+    if (!property) return
+    window.open(getCustomerPropertyUrl(property.id), '_blank', 'noopener,noreferrer')
+  }, [property])
+
+  const handleStatusChange = useCallback(
+    async (next: PropertyStatus) => {
+      if (!property || next === property.status) return
+      const patch: Partial<Property> = { status: next }
+      if (next === 'sold') {
+        patch.soldAt = new Date().toISOString()
+        patch.isFeatured = false
+        patch.isUpcoming = false
+      }
+      const ok = await updateProperty(patch)
+      if (ok) showToast(`Status changed to ${getStatusLabel(next)}`)
+    },
+    [property, showToast, updateProperty],
+  )
 
   const photos = property?.photos ?? []
   const hasPhotos = photos.length > 0 || !!property?.coverPhoto
@@ -906,11 +942,28 @@ export function PropertyDetailPage() {
 
       {showPreview && (
         <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/60 p-4">
-          <div className="mb-4 flex w-full max-w-[375px] items-center justify-between text-white">
-            <span className="text-sm font-medium">App preview (B-04)</span>
-            <Button type="button" variant="outline" size="sm" onClick={() => setShowPreview(false)}>
-              Close
-            </Button>
+          <div className="mb-4 flex w-full max-w-[375px] items-center justify-between gap-3 rounded-xl border border-white/20 bg-black/40 px-3 py-2 backdrop-blur-sm">
+            <span className="text-sm font-medium text-white">App preview (B-04)</span>
+            <div className="flex shrink-0 items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="border-white/50 bg-white text-foreground hover:bg-white/90"
+                onClick={openPropertyInCustomerApp}
+              >
+                Open in app
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="border-white/50 bg-white text-foreground hover:bg-white/90"
+                onClick={() => setShowPreview(false)}
+              >
+                Close
+              </Button>
+            </div>
           </div>
           <div className="w-[375px] overflow-hidden rounded-2xl border border-border bg-card shadow-2xl">
             <div className="relative h-48 bg-muted">
@@ -1027,16 +1080,7 @@ export function PropertyDetailPage() {
           <Button type="button" variant="outline" size="sm" onClick={openPriceEdit}>
             💰 Update Price
           </Button>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              setEditTitle(property.title)
-              setEditDescription(property.description)
-              setPropertyEditOpen(true)
-            }}
-          >
+          <Button type="button" variant="outline" size="sm" onClick={openEditForm}>
             ✏️ Edit Property
           </Button>
           <Button
@@ -1065,20 +1109,13 @@ export function PropertyDetailPage() {
           <Button type="button" variant="outline" size="sm" onClick={toggleUpcoming}>
             🕐 Toggle Upcoming
           </Button>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => showToast('Opens on mobile app')}
-          >
+          <Button type="button" variant="outline" size="sm" onClick={openAppPreview}>
             📱 View on App
           </Button>
           <select
             value={property.status}
             onChange={(e) => {
-              const next = e.target.value as PropertyStatus
-              updateProperty({ status: next })
-              showToast(`Status changed to ${getStatusLabel(next)}`)
+              void handleStatusChange(e.target.value as PropertyStatus)
             }}
             className="h-8 rounded-md border border-border bg-input px-2 text-sm"
           >

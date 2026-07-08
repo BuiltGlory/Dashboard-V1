@@ -449,7 +449,7 @@ export const MOCK_CALLBACKS: Callback[] = [
     source: 'profile_support',
     sourceScreen: 'P-11 Profile Help & Support',
     category: 'general',
-    reason: 'How to update profile photo and KYC documents',
+    reason: 'How to update profile photo and documents',
     preferredTime: '2026-05-30T12:00:00Z',
     bestTimePreference: 'afternoon',
     assignedTo: 'Vikram Ops',

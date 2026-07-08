@@ -27,6 +27,7 @@ import {
   workflowLogToPanelCall,
   workflowLogToStageNote,
 } from '@/pages/admin/workflowStagePersistence'
+import { NOTIFICATION_TEMPLATES, sendPushNotification } from '@/utils/notifications'
 
 export interface NegotiationStageProps {
   acquisition: Acquisition
@@ -251,6 +252,18 @@ export function NegotiationStage({ acquisition, onStageChange }: NegotiationStag
         .then((saved) => onStageChange(saved.stage, { negotiation: saved.negotiation, builtgloryOffer: saved.builtgloryOffer }))
         .catch(() => undefined)
     }
+    if (offerBy === 'builtglory') {
+      const offerTemplate = NOTIFICATION_TEMPLATES.N04_OFFER_SENT(
+        acquisition.sellerName,
+        acquisition.propertyTitle,
+      )
+      sendPushNotification(acquisition.sellerName, offerTemplate, 'N-04', {
+        dedupeKey: `N-04:${acquisition.id}:${nextOffer.id}`,
+        audience: 'seller',
+        userId: acquisition.sellerUserId,
+        relatedTo: { type: 'acquisition', id: acquisition.id },
+      })
+    }
     setShowOfferForm(false)
     setOfferAmount('')
     setOfferNotes('')
@@ -317,6 +330,16 @@ export function NegotiationStage({ acquisition, onStageChange }: NegotiationStag
         agreedPrice: agreedNum,
         closedAt: new Date().toISOString(),
       },
+    })
+    const sellerTemplate = NOTIFICATION_TEMPLATES.N05_DEAL_CONFIRMED_SELLER(
+      acquisition.sellerName,
+      acquisition.propertyTitle,
+    )
+    sendPushNotification(acquisition.sellerName, sellerTemplate, 'N-05', {
+      dedupeKey: `N-05:seller:${acquisition.id}`,
+      audience: 'seller',
+      userId: acquisition.sellerUserId,
+      relatedTo: { type: 'acquisition', id: acquisition.id },
     })
     navigate('/admin/acquisition/token')
   }

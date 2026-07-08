@@ -16,7 +16,6 @@ import {
   MessageSquare,
   Phone,
   Plus,
-  ShieldAlert,
   X,
 } from 'lucide-react'
 import { Bar, BarChart, ResponsiveContainer, XAxis, YAxis } from 'recharts'
@@ -32,9 +31,11 @@ import {
   getAdminSellRequest,
   getCompletenessColor,
   getMissingItems,
+  getSalesPersonById,
   getSimilarProperties,
   parseSellAskingPrice,
   reviewAdminSellRequest,
+  updateAdminSellRequest,
   type SalesPerson,
   type SellRequest,
   type SellRequestStatus,
@@ -469,12 +470,14 @@ export function SellRequestDetailPage() {
     ) => {
       let msg = sendPushNotification(userName, template, notificationId, {
         dedupeKey,
+        audience: template.audience || 'seller',
         relatedTo: request ? { type: 'sell-request', id: request.id } : undefined,
       })
       if (msg.includes('recently') && window.confirm(`${msg}\n\nSend again anyway?`)) {
         msg = sendPushNotification(userName, template, notificationId, {
           skipDuplicateCheck: true,
           dedupeKey,
+          audience: template.audience || 'seller',
           relatedTo: request ? { type: 'sell-request', id: request.id } : undefined,
         })
       }
@@ -516,7 +519,15 @@ export function SellRequestDetailPage() {
       setRequest(found)
       setStatus(found.status)
       setAssignedTo(found.assignedTo)
-      setAdminTeam(team.filter((member) => member.isAvailable))
+      const availableTeam = team.filter((member) => member.isAvailable)
+      const assignedMember = found.assignedTo
+        ? team.find((member) => member.id === found.assignedTo)
+        : undefined
+      setAdminTeam(
+        assignedMember && !availableTeam.some((member) => member.id === assignedMember.id)
+          ? [assignedMember, ...availableTeam]
+          : availableTeam,
+      )
       setActivities([
         ...timelineLogs.map((log) => ({
           id: log.id,
@@ -560,6 +571,35 @@ export function SellRequestDetailPage() {
       ...prev,
     ])
   }, [])
+
+  const handleAssignSalesPerson = useCallback(
+    async (salesPersonId: string) => {
+      const session = readAdminSession()
+      const person = getSalesPersonById(salesPersonId, adminTeam)
+      if (!person || !request || !id) return
+      if (!session?.accessToken) {
+        showToast('Your admin session has expired. Please log in again.')
+        return
+      }
+
+      try {
+        const updated = await updateAdminSellRequest(session.accessToken, id, {
+          assignedTo: salesPersonId,
+        })
+        setAssignedTo(updated.assignedTo)
+        setRequest(updated)
+        addActivity({
+          type: 'status',
+          text: `Assigned to ${person.name}`,
+          at: new Date().toISOString(),
+        })
+        showToast(`Assigned to ${person.name}`)
+      } catch (error) {
+        showToast(error instanceof Error ? error.message : 'Unable to assign sell request')
+      }
+    },
+    [adminTeam, request, id, addActivity, showToast],
+  )
 
   const updateStatus = useCallback(
     (next: SellRequestStatus, extra?: Partial<SellRequest>) => {
@@ -630,10 +670,11 @@ export function SellRequestDetailPage() {
       {
         title: 'Listing Paused',
         body: `Your listing "${request.propertyTitle}" has been paused. Reason: ${pauseReason}`,
-        deepLink: 'SL-18 Listing Status',
+        deepLink: 'P-05',
+        audience: 'seller',
       },
-      'N-07',
-      `N-07:pause:${request.id}`,
+      'N-02',
+      `N-02:pause:${request.id}`,
     )
   }, [request, pauseReason, updateStatus, showToast, dispatchPush])
 
@@ -664,7 +705,7 @@ export function SellRequestDetailPage() {
       return
     }
 
-    const template = NOTIFICATION_TEMPLATES.N06_LISTING_APPROVED(
+    const template = NOTIFICATION_TEMPLATES.N02_LISTING_APPROVED(
       request.sellerName,
       request.propertyTitle,
     )
@@ -677,7 +718,7 @@ export function SellRequestDetailPage() {
         reviewed = await reviewAdminSellRequest(session.accessToken, reviewed.id, 'accepted')
       }
       const acquisition = await createAdminAcquisitionFromSellRequest(session.accessToken, reviewed.id)
-      dispatchPush(request.sellerName, template, 'N-06', `N-06:${request.id}`)
+      dispatchPush(request.sellerName, template, 'N-02', `N-02:approved:${request.id}`)
       updateStatus('accepted')
       setMatchingAcq({ id: acquisition.id, referenceId: acquisition.referenceId })
       setShowAcceptConfirm(false)
@@ -697,13 +738,13 @@ export function SellRequestDetailPage() {
       showToast('Rejection reason required')
       return
     }
-    const template = NOTIFICATION_TEMPLATES.N07_LISTING_REJECTED(
+    const template = NOTIFICATION_TEMPLATES.N06_REUPLOAD_REQUIRED(
       request.sellerName,
       request.propertyTitle,
       rejectionReason,
     )
     if (notifySellerReject) {
-      dispatchPush(request.sellerName, template, 'N-07', `N-07:${request.id}`)
+      dispatchPush(request.sellerName, template, 'N-06', `N-06:reject:${request.id}`)
       if (request.email) {
         window.open(`mailto:${request.email}?subject=Listing%20Rejected`)
       }
@@ -713,7 +754,7 @@ export function SellRequestDetailPage() {
   }
 
   const rejectPreviewTemplate = request
-    ? NOTIFICATION_TEMPLATES.N07_LISTING_REJECTED(
+    ? NOTIFICATION_TEMPLATES.N06_REUPLOAD_REQUIRED(
         request.sellerName,
         request.propertyTitle,
         `${rejectReason}. ${rejectNotes}`.trim() || rejectReason,
@@ -910,16 +951,16 @@ export function SellRequestDetailPage() {
             The listing will move to the Acquisition Pipeline pending queue.
           </p>
           <NotificationPreview
-            notificationId="N-06"
-            title={NOTIFICATION_TEMPLATES.N06_LISTING_APPROVED(
+            notificationId="N-02"
+            title={NOTIFICATION_TEMPLATES.N02_LISTING_APPROVED(
               request.sellerName,
               request.propertyTitle,
             ).title}
-            body={NOTIFICATION_TEMPLATES.N06_LISTING_APPROVED(
+            body={NOTIFICATION_TEMPLATES.N02_LISTING_APPROVED(
               request.sellerName,
               request.propertyTitle,
             ).body}
-            deepLink="SL-09 Seller Dashboard"
+            deepLink="P-05"
             recipientLabel="seller"
           />
           <div className="mt-6 flex gap-2">
@@ -979,7 +1020,7 @@ export function SellRequestDetailPage() {
             <div className="mt-3 space-y-2">
               <p className="text-sm font-medium">📱 Notification that will be sent:</p>
               <NotificationPreview
-                notificationId="N-07"
+                notificationId="N-06"
                 title={rejectPreviewTemplate.title}
                 body={rejectPreviewTemplate.body}
                 deepLink={rejectPreviewTemplate.deepLink}
@@ -1042,10 +1083,11 @@ export function SellRequestDetailPage() {
             ))}
           </select>
           <NotificationPreview
-            notificationId="N-07"
+            notificationId="N-02"
             title="Listing Paused"
             body={`Your listing "${request.propertyTitle}" has been paused.`}
-            deepLink="SL-18 Listing Status"
+            deepLink="P-05"
+            recipientLabel="seller"
           />
           <div className="mt-4 flex gap-2">
             <Button
@@ -1103,13 +1145,6 @@ export function SellRequestDetailPage() {
 
       <Breadcrumb title={request.propertyTitle} navigate={navigate} />
 
-      {request.kycStatus !== 'verified' && (
-        <div className="mt-4 flex items-center gap-2 rounded-lg border border-orange-200 bg-orange-50 px-4 py-3 text-sm text-orange-900">
-          <ShieldAlert className="size-5 shrink-0" />
-          Seller KYC not complete — verify before accepting.
-        </div>
-      )}
-
       {request.hasPreviousRejection && (
         <div className="mt-2 flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-800">
           <AlertTriangle className="size-4" />
@@ -1131,13 +1166,18 @@ export function SellRequestDetailPage() {
         <div>
           <h1 className="text-2xl font-bold">{request.propertyTitle}</h1>
           <p className="text-sm text-muted-foreground">
-            {request.referenceId} · Submitted {formatFullDate(request.submittedAt)}
+            {request.referenceId}
+            {request.isDraft || request.status === 'draft'
+              ? request.draftSavedAt
+                ? ` · Draft saved ${formatFullDate(request.draftSavedAt)}`
+                : ' · Draft'
+              : ` · Submitted ${formatFullDate(request.submittedAt)}`}
           </p>
         </div>
         <div className="flex flex-col items-start gap-3 sm:items-end">
           <StatusBadge status={status} />
           <div className="flex flex-wrap gap-2">
-            <Button variant="outline" size="sm" onClick={() => handleCall(request.phone)}>
+            <Button variant="outline" size="sm" onClick={() => handleCall(request.phone, toastApi)}>
               <Phone className="size-4" /> Call Seller
             </Button>
             <Button
@@ -1161,13 +1201,17 @@ export function SellRequestDetailPage() {
             </Button>
             <select
               value={assignedTo ?? ''}
-              onChange={(e) => setAssignedTo(e.target.value || null)}
+              onChange={(e) => {
+                const nextId = e.target.value
+                if (!nextId) return
+                void handleAssignSalesPerson(nextId)
+              }}
               className="h-8 rounded-md border border-border bg-card px-2 text-xs"
               disabled={isFinal}
             >
               <option value="">Assign to...</option>
               {adminTeam.map((member) => (
-                <option key={member.id} value={member.name}>
+                <option key={member.id} value={member.id}>
                   {member.name}
                 </option>
               ))}
@@ -1577,17 +1621,6 @@ export function SellRequestDetailPage() {
               <Badge variant="default" className="mt-2 capitalize">
                 {request.userType}
               </Badge>
-              <div className="mt-3">
-                {request.kycStatus === 'verified' && (
-                  <Badge className="bg-green-100 text-green-700">KYC Verified</Badge>
-                )}
-                {request.kycStatus === 'pending' && (
-                  <Badge className="bg-orange-100 text-orange-700">KYC Pending</Badge>
-                )}
-                {request.kycStatus === 'rejected' && (
-                  <Badge variant="red">KYC Rejected</Badge>
-                )}
-              </div>
               <button
                 type="button"
                 className="mt-4 block text-sm hover:text-primary"
@@ -1963,9 +1996,9 @@ export function SellRequestDetailPage() {
               <CardTitle>Review Actions</CardTitle>
             </CardHeader>
             <CardContent className="space-y-2">
-              {status === 'accepted' && pushSentBanner?.notificationId === 'N-06' && (
+              {status === 'accepted' && pushSentBanner?.notificationId === 'N-02' && (
                 <div className="rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-900">
-                  <p className="font-medium">✅ Push notification N-06 sent to seller</p>
+                  <p className="font-medium">✅ Push notification N-02 sent to seller</p>
                   <p className="mt-1 font-medium">{pushSentBanner.template.title}</p>
                   <p className="text-xs text-green-800">{pushSentBanner.template.body}</p>
                 </div>

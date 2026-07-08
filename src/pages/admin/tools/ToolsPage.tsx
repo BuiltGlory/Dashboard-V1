@@ -10,14 +10,19 @@ import {
 import { useLocation, useNavigate } from 'react-router'
 import {
   AlertCircle,
+  BarChart2,
   ChevronDown,
   ChevronUp,
   FileSpreadsheet,
-  BarChart2,
   GripVertical,
   Home,
   Image as ImageIcon,
+  Package,
   Plus,
+  Rocket,
+  Sparkles,
+  Tag,
+  Ticket,
   Trash2,
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
@@ -58,6 +63,7 @@ import {
   updateAdminProperty,
   type PropertyImportJob,
 } from '@/api/adminProperties'
+import { getAdminSettings } from '@/api/adminSettings'
 import { listAdminUsers, type User } from '@/api/adminUsers'
 import { cn } from '@/lib/utils'
 import { findUnknownTemplateVars } from '@/utils/edgeCases'
@@ -842,6 +848,17 @@ interface BoostPlan {
   active: boolean
 }
 
+interface BoostOrder {
+  id: string
+  propertyId: string
+  property: string
+  plan: string
+  started: string
+  expires: string
+  daysLeft: number
+  status: 'active' | 'expired'
+}
+
 interface InteriorPackage {
   id: string
   name: string
@@ -900,9 +917,192 @@ interface Coupon {
 interface ToolsOperationalConfig {
   cities: CityRow[]
   localities: LocalityRow[]
+  zones: MapZone[]
   boostPlans: BoostPlan[]
+  boostOrders?: BoostOrder[]
   interiorPkgs: InteriorPackage[]
   coupons: Coupon[]
+}
+
+const BOOST_DURATION_DAYS = 7
+
+const DEFAULT_BOOST_PLANS: BoostPlan[] = [
+  {
+    id: 'bp1',
+    name: 'Basic',
+    priceLabel: 'Free',
+    description: 'Standard visibility',
+    benefits: ['Listed in search', 'Basic analytics'],
+    active: true,
+  },
+  {
+    id: 'bp2',
+    name: 'Featured',
+    priceLabel: '₹999/week',
+    description: 'Highlighted in search results',
+    benefits: ['Featured badge', '2x visibility', 'Priority support'],
+    active: true,
+  },
+  {
+    id: 'bp3',
+    name: 'Premium',
+    priceLabel: '₹2499/week',
+    description: 'Top placement across the app',
+    benefits: ['Top placement', 'Home carousel', 'Dedicated manager'],
+    active: true,
+  },
+]
+
+function formatBoostDate(iso: string) {
+  const parsed = new Date(iso)
+  if (Number.isNaN(parsed.getTime())) return '—'
+  return parsed.toLocaleDateString('en-IN', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+  })
+}
+
+function resolveBoostPlanName(featuredIndex: number, boostPlans: BoostPlan[]): string {
+  const activePlans = boostPlans.filter((plan) => plan.active)
+  if (!activePlans.length) return 'Featured'
+  if (featuredIndex === 0) {
+    return activePlans[activePlans.length - 1]?.name ?? 'Premium'
+  }
+  if (featuredIndex === 1) {
+    return activePlans[Math.min(1, activePlans.length - 1)]?.name ?? 'Featured'
+  }
+  return activePlans[0]?.name ?? 'Basic'
+}
+
+function buildBoostOrderFromProperty(
+  property: Property,
+  featuredIndex: number,
+  boostPlans: BoostPlan[],
+): BoostOrder {
+  const startedAt = new Date(property.updatedAt || property.addedAt)
+  const expiresAt = new Date(startedAt)
+  expiresAt.setDate(expiresAt.getDate() + BOOST_DURATION_DAYS)
+  const daysLeft = Math.max(
+    0,
+    Math.ceil((expiresAt.getTime() - Date.now()) / 86400000),
+  )
+  const status: BoostOrder['status'] = daysLeft > 0 ? 'active' : 'expired'
+
+  return {
+    id: `boost-${property.id}`,
+    propertyId: property.id,
+    property: property.title,
+    plan: resolveBoostPlanName(featuredIndex, boostPlans),
+    started: formatBoostDate(startedAt.toISOString()),
+    expires: formatBoostDate(expiresAt.toISOString()),
+    daysLeft,
+    status,
+  }
+}
+
+function buildActiveBoostOrders(
+  properties: Property[],
+  featuredOrder: string[],
+  boostPlans: BoostPlan[],
+): BoostOrder[] {
+  const featuredProperties = getOrderedFeaturedList(properties, featuredOrder)
+  return featuredProperties.map((property, index) =>
+    buildBoostOrderFromProperty(property, index, boostPlans),
+  )
+}
+
+function mergePropertyLists(...lists: Property[][]): Property[] {
+  const byId = new Map<string, Property>()
+  for (const list of lists) {
+    for (const property of list) {
+      byId.set(property.id, property)
+    }
+  }
+  return Array.from(byId.values())
+}
+
+function computeLocationCounts(properties: Property[]) {
+  const cityCounts: Record<string, number> = {}
+  const localityCounts: Record<string, number> = {}
+  for (const property of properties) {
+    const city = property.city?.trim()
+    const locality = property.locality?.trim()
+    if (city) {
+      const cityKey = city.toLowerCase()
+      cityCounts[cityKey] = (cityCounts[cityKey] ?? 0) + 1
+    }
+    if (city && locality) {
+      const localityKey = `${city.toLowerCase()}|${locality.toLowerCase()}`
+      localityCounts[localityKey] = (localityCounts[localityKey] ?? 0) + 1
+    }
+  }
+  return { cityCounts, localityCounts }
+}
+
+function withCityPropertyCounts(cities: CityRow[], cityCounts: Record<string, number>): CityRow[] {
+  return cities.map((city) => ({
+    ...city,
+    propertiesCount: cityCounts[city.city.trim().toLowerCase()] ?? 0,
+  }))
+}
+
+function withLocalityPropertyCounts(
+  localities: LocalityRow[],
+  localityCounts: Record<string, number>,
+): LocalityRow[] {
+  return localities.map((locality) => ({
+    ...locality,
+    propertiesCount:
+      localityCounts[
+        `${locality.city.trim().toLowerCase()}|${locality.locality.trim().toLowerCase()}`
+      ] ?? 0,
+  }))
+}
+
+function inferCitiesFromProperties(properties: Property[]): CityRow[] {
+  const byCity = new Map<string, { state: string }>()
+  for (const property of properties) {
+    const city = property.city?.trim()
+    if (!city) continue
+    const state = property.state?.trim() || ''
+    const existing = byCity.get(city)
+    if (!existing) {
+      byCity.set(city, { state })
+    } else if (!existing.state && state) {
+      existing.state = state
+    }
+  }
+  return Array.from(byCity.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([city, { state }], index) => ({
+      id: `inferred-city-${index + 1}`,
+      city,
+      state,
+      propertiesCount: 0,
+      active: true,
+    }))
+}
+
+function inferLocalitiesFromProperties(properties: Property[]): LocalityRow[] {
+  const seen = new Set<string>()
+  const rows: LocalityRow[] = []
+  for (const property of properties) {
+    const city = property.city?.trim()
+    const locality = property.locality?.trim()
+    if (!city || !locality) continue
+    const key = `${city.toLowerCase()}|${locality.toLowerCase()}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    rows.push({
+      id: `inferred-locality-${rows.length + 1}`,
+      locality,
+      city,
+      propertiesCount: 0,
+      active: true,
+    })
+  }
+  return rows.sort((a, b) => a.city.localeCompare(b.city) || a.locality.localeCompare(b.locality))
 }
 
 interface MessageTemplate {
@@ -943,6 +1143,25 @@ interface PropertyTypeIcon {
   showOnSell: boolean
   active: boolean
   order: number
+}
+
+function mergePropertyTypesWithDefaults(cmsTypes: PropertyTypeIcon[]): PropertyTypeIcon[] {
+  const defaults = buildDefaultPropertyTypes()
+  const defaultBySlug = new Map(defaults.map((item) => [item.slug, item]))
+  if (!cmsTypes.length) return defaults
+
+  return cmsTypes.map((cms) => {
+    const fallback = defaultBySlug.get(cms.slug)
+    if (!fallback) return cms
+    return {
+      ...fallback,
+      ...cms,
+      slug: fallback.slug,
+      typeName: fallback.typeName,
+      displayName: fallback.displayName,
+      icon: cms.icon || fallback.icon,
+    }
+  })
 }
 
 function buildDefaultPropertyTypes(): PropertyTypeIcon[] {
@@ -1176,16 +1395,8 @@ const INITIAL_PUSH_HISTORY: PushNotification[] = []
 const INITIAL_CITIES: CityRow[] = []
 const INITIAL_LOCALITIES: LocalityRow[] = []
 const INITIAL_ZONES: MapZone[] = []
-const INITIAL_BOOST_PLANS: BoostPlan[] = []
-const INITIAL_BOOST_ORDERS: Array<{
-  id: string
-  property: string
-  plan: string
-  started: string
-  expires: string
-  daysLeft: number
-  status: 'active' | 'expired'
-}> = []
+const INITIAL_BOOST_PLANS: BoostPlan[] = DEFAULT_BOOST_PLANS
+const INITIAL_ARCHIVED_BOOST_ORDERS: BoostOrder[] = []
 const INITIAL_INTERIOR: InteriorPackage[] = []
 const INITIAL_COUPONS: Coupon[] = []
 const INITIAL_TEMPLATES: MessageTemplate[] = []
@@ -1340,9 +1551,6 @@ function countNri(users: User[]) {
   return users.filter((u) => u.userType === 'nri').length
 }
 
-function countKycVerified(users: User[]) {
-  return users.filter((u) => u.kycStatus === 'verified').length
-}
 
 export function ToolsPage() {
   const { pathname } = useLocation()
@@ -1459,30 +1667,28 @@ export function ToolsPage() {
 
   const [cities, setCities] = useState<CityRow[]>(INITIAL_CITIES)
   const [localities, setLocalities] = useState<LocalityRow[]>(INITIAL_LOCALITIES)
-  const [zones] = useState<MapZone[]>(INITIAL_ZONES)
+  const [zones, setZones] = useState<MapZone[]>(INITIAL_ZONES)
   const [cityFormOpen, setCityFormOpen] = useState(false)
   const [cityDraft, setCityDraft] = useState({ city: '', state: '', active: true })
   const [editingCityId, setEditingCityId] = useState<string | null>(null)
-  const [localityCityFilter, setLocalityCityFilter] = useState('Bangalore')
+  const [localityCityFilter, setLocalityCityFilter] = useState('')
   const [localityFormOpen, setLocalityFormOpen] = useState(false)
   const [localityDraft, setLocalityDraft] = useState({
     locality: '',
-    city: 'Bangalore',
+    city: '',
     active: true,
   })
   const [editingLocalityId, setEditingLocalityId] = useState<string | null>(null)
+  const [zoneFormOpen, setZoneFormOpen] = useState(false)
+  const [zoneDraft, setZoneDraft] = useState({ name: '', city: '', coordinates: '', active: true })
+  const [editingZoneId, setEditingZoneId] = useState<string | null>(null)
 
   const [boostPlans, setBoostPlans] = useState<BoostPlan[]>(INITIAL_BOOST_PLANS)
   const [boostOrderFilter, setBoostOrderFilter] = useState<'all' | 'active' | 'expired'>('all')
-  const [boostOrders, setBoostOrders] = useState<Array<{
-    id: string
-    property: string
-    plan: string
-    started: string
-    expires: string
-    daysLeft: number
-    status: 'active' | 'expired'
-  }>>(INITIAL_BOOST_ORDERS)
+  const [archivedBoostOrders, setArchivedBoostOrders] = useState<BoostOrder[]>(
+    INITIAL_ARCHIVED_BOOST_ORDERS,
+  )
+  const [boostOrderActionId, setBoostOrderActionId] = useState<string | null>(null)
   const [interiorPkgs, setInteriorPkgs] = useState<InteriorPackage[]>(INITIAL_INTERIOR)
   const [designers, setDesigners] = useState<Designer[]>([])
   const [designerFormOpen, setDesignerFormOpen] = useState(false)
@@ -1654,6 +1860,7 @@ export function ToolsPage() {
     setLoading(true)
     Promise.all([
       listAdminProperties(session.accessToken, { limit: 100, sort: 'newest' }),
+      listAdminProperties(session.accessToken, { featured: true, limit: 50, sort: 'newest' }),
       listAdminUsers(session.accessToken, { limit: 100, sort: 'newest' }),
       getAdminDesigners(session.accessToken),
       listAdminContent(session.accessToken, { limit: 100, sort: 'newest' }),
@@ -1661,10 +1868,12 @@ export function ToolsPage() {
       listAdminBulkMessages(session.accessToken),
       listAdminPropertyImportJobs(session.accessToken, 20),
       loadAllMessages(),
+      getAdminSettings(session.accessToken).catch(() => null),
     ])
-      .then(([properties, nextUsers, nextDesigners, nextContent, nextTemplates, nextBulkHistory, nextImportJobs, nextSentMessages]) => {
+      .then(([properties, featuredProperties, nextUsers, nextDesigners, nextContent, nextTemplates, nextBulkHistory, nextImportJobs, nextSentMessages, adminSettings]) => {
         if (cancelled) return
-        const catalog = initPropertyCatalog(properties.data)
+        const mergedProperties = mergePropertyLists(properties.data, featuredProperties.data)
+        const catalog = initPropertyCatalog(mergedProperties)
         const contentRows = nextContent.data
         const curationConfig = contentBySlug(contentRows, FEATURED_UPCOMING_CONTENT_SLUG)
         const cmsFeaturedOrder = metadataArray<string>(curationConfig, 'featuredOrder')
@@ -1700,19 +1909,49 @@ export function ToolsPage() {
         const cmsForceUpdate = metadataRecord(forceUpdateConfig, 'forceUpdate')
         const cmsCities = metadataArray<CityRow>(toolsOperationalConfig, 'cities')
         const cmsLocalities = metadataArray<LocalityRow>(toolsOperationalConfig, 'localities')
+        const cmsZones = metadataArray<MapZone>(toolsOperationalConfig, 'zones')
         const cmsBoostPlans = metadataArray<BoostPlan>(toolsOperationalConfig, 'boostPlans')
+        const cmsBoostOrders = metadataArray<BoostOrder>(toolsOperationalConfig, 'boostOrders')
         const cmsInteriorPkgs = metadataArray<InteriorPackage>(toolsOperationalConfig, 'interiorPkgs')
         const cmsCoupons = metadataArray<Coupon>(toolsOperationalConfig, 'coupons')
         if (cmsHomeBanners.length) setHomeBanners(cmsHomeBanners.map(normalizeHomeBanner))
         if (cmsHomeSections.length) setSections(cmsHomeSections)
         if (cmsOnboardingSlides.length) setOnboardingSlides(cmsOnboardingSlides)
-        if (cmsPropertyTypes.length) setPropertyTypes(cmsPropertyTypes)
+        if (cmsPropertyTypes.length) setPropertyTypes(mergePropertyTypesWithDefaults(cmsPropertyTypes))
         if (cmsScheduledNotifications.length) setScheduledNotifications(cmsScheduledNotifications)
-        if (cmsCities.length) setCities(cmsCities)
-        if (cmsLocalities.length) setLocalities(cmsLocalities)
-        if (cmsBoostPlans.length) setBoostPlans(cmsBoostPlans)
-        if (cmsInteriorPkgs.length) setInteriorPkgs(cmsInteriorPkgs)
-        if (cmsCoupons.length) setCoupons(cmsCoupons)
+        if (cmsCities.length) {
+          setCities(cmsCities)
+        } else {
+          const inferredCities = inferCitiesFromProperties(catalog.properties)
+          if (inferredCities.length) setCities(inferredCities)
+        }
+        if (cmsLocalities.length) {
+          setLocalities(cmsLocalities)
+        } else {
+          const inferredLocalities = inferLocalitiesFromProperties(catalog.properties)
+          if (inferredLocalities.length) setLocalities(inferredLocalities)
+        }
+        if (cmsZones.length) setZones(cmsZones)
+        if (cmsBoostPlans.length) {
+          setBoostPlans(cmsBoostPlans)
+        } else if (adminSettings?.tools?.boostPlans?.length) {
+          setBoostPlans(adminSettings.tools.boostPlans)
+        }
+        if (cmsBoostOrders.length) {
+          setArchivedBoostOrders(
+            cmsBoostOrders.filter((order) => order.status === 'expired'),
+          )
+        }
+        if (cmsInteriorPkgs.length) {
+          setInteriorPkgs(cmsInteriorPkgs)
+        } else if (adminSettings?.tools?.interiorPackages?.length) {
+          setInteriorPkgs(adminSettings.tools.interiorPackages)
+        }
+        if (cmsCoupons.length) {
+          setCoupons(cmsCoupons)
+        } else if (adminSettings?.tools?.coupons?.length) {
+          setCoupons(adminSettings.tools.coupons)
+        }
         if (cmsForceUpdate) {
           setForceUpdateEnabled(Boolean(cmsForceUpdate.enabled))
           if (typeof cmsForceUpdate.minVersion === 'string') {
@@ -1761,7 +2000,9 @@ export function ToolsPage() {
     const config: ToolsOperationalConfig = {
       cities,
       localities,
+      zones,
       boostPlans,
+      boostOrders: archivedBoostOrders,
       interiorPkgs,
       coupons,
     }
@@ -1777,7 +2018,7 @@ export function ToolsPage() {
         })
     }, 800)
     return () => window.clearTimeout(timer)
-  }, [boostPlans, cities, coupons, interiorPkgs, localities, saveToolsOperationalConfig, showToast])
+  }, [archivedBoostOrders, boostPlans, cities, coupons, interiorPkgs, localities, saveToolsOperationalConfig, showToast, zones])
 
   useEffect(() => {
     if (!toast) return
@@ -1801,8 +2042,6 @@ export function ToolsPage() {
         return countSellers(users)
       case 'nri':
         return countNri(users)
-      case 'kyc':
-        return countKycVerified(users)
       default:
         return users.length
     }
@@ -1824,8 +2063,25 @@ export function ToolsPage() {
     return map[pushAudience] ?? pushAudience
   }, [pushAudience, pushPhone])
 
-  const filteredLocalities = localities.filter(
-    (l) => l.city === localityCityFilter,
+  const locationCounts = useMemo(
+    () => computeLocationCounts(appProperties),
+    [appProperties],
+  )
+  const citiesWithCounts = useMemo(
+    () => withCityPropertyCounts(cities, locationCounts.cityCounts),
+    [cities, locationCounts.cityCounts],
+  )
+  const localitiesWithCounts = useMemo(
+    () => withLocalityPropertyCounts(localities, locationCounts.localityCounts),
+    [localities, locationCounts.localityCounts],
+  )
+  const effectiveLocalityCityFilter = useMemo(() => {
+    if (!cities.length) return ''
+    if (cities.some((city) => city.city === localityCityFilter)) return localityCityFilter
+    return cities[0].city
+  }, [cities, localityCityFilter])
+  const filteredLocalities = localitiesWithCounts.filter(
+    (l) => l.city === effectiveLocalityCityFilter,
   )
 
   const templateHasVars = /\{[^}]+\}/.test(templateDraft.body)
@@ -1853,6 +2109,29 @@ export function ToolsPage() {
   const featuredProperties = useMemo(
     () => getOrderedFeaturedList(appProperties, featuredOrder),
     [appProperties, featuredOrder],
+  )
+  const boostOrders = useMemo(() => {
+    const activeOrders = buildActiveBoostOrders(appProperties, featuredOrder, boostPlans)
+    const activePropertyIds = new Set(activeOrders.map((order) => order.propertyId))
+    const archivedOrders = archivedBoostOrders.filter(
+      (order) => !activePropertyIds.has(order.propertyId),
+    )
+    return [...activeOrders, ...archivedOrders]
+  }, [appProperties, archivedBoostOrders, boostPlans, featuredOrder])
+  const filteredBoostOrders = useMemo(
+    () =>
+      boostOrders.filter(
+        (order) => boostOrderFilter === 'all' || order.status === boostOrderFilter,
+      ),
+    [boostOrderFilter, boostOrders],
+  )
+  const boostOrderStats = useMemo(
+    () => ({
+      active: boostOrders.filter((order) => order.status === 'active').length,
+      expired: boostOrders.filter((order) => order.status === 'expired').length,
+      total: boostOrders.length,
+    }),
+    [boostOrders],
   )
   const upcomingProperties = useMemo(
     () => getOrderedUpcomingList(appProperties, upcomingOrder),
@@ -1983,6 +2262,45 @@ export function ToolsPage() {
       }
     },
     [appProperties, featuredOrder, savePropertyCurationConfig, showToast, upcomingOrder],
+  )
+
+  const deactivateBoostOrder = useCallback(
+    async (order: BoostOrder) => {
+      if (
+        !window.confirm(
+          `Deactivate boost for ${order.property}? This removes the property from featured listings.`,
+        )
+      ) {
+        return
+      }
+      const session = readAdminSession()
+      if (!session?.accessToken) {
+        showToast('Sign in again to deactivate boost orders')
+        return
+      }
+      setBoostOrderActionId(order.id)
+      try {
+        const nextOrder = featuredOrder.filter((id) => id !== order.propertyId)
+        const saved = await updateAdminProperty(session.accessToken, order.propertyId, {
+          isFeatured: false,
+        })
+        await savePropertyCurationConfig(nextOrder, upcomingOrder)
+        setFeaturedOrder(nextOrder)
+        setAppProperties((prev) =>
+          prev.map((property) => (property.id === order.propertyId ? saved : property)),
+        )
+        setArchivedBoostOrders((prev) => [
+          ...prev.filter((item) => item.propertyId !== order.propertyId),
+          { ...order, status: 'expired', daysLeft: 0 },
+        ])
+        showToast(`Boost deactivated for ${order.property}`)
+      } catch (error) {
+        showToast(error instanceof Error ? error.message : 'Could not deactivate boost')
+      } finally {
+        setBoostOrderActionId(null)
+      }
+    },
+    [featuredOrder, savePropertyCurationConfig, showToast, upcomingOrder],
   )
 
   const addToFeatured = useCallback(
@@ -2736,11 +3054,14 @@ export function ToolsPage() {
   }
 
   const deleteCity = (row: CityRow) => {
-    if (row.propertiesCount > 0) {
-      window.alert(`${row.propertiesCount} properties in this city — remove or reassign first`)
+    const count =
+      locationCounts.cityCounts[row.city.trim().toLowerCase()] ?? row.propertiesCount
+    if (count > 0) {
+      window.alert(`${count} properties in this city — remove or reassign first`)
       return
     }
     setCities((prev) => prev.filter((c) => c.id !== row.id))
+    setLocalities((prev) => prev.filter((l) => l.city !== row.city))
     showToast('City deleted')
   }
 
@@ -2769,6 +3090,51 @@ export function ToolsPage() {
     setLocalityFormOpen(false)
     setEditingLocalityId(null)
     showToast('Locality saved')
+  }
+
+  const deleteLocality = (row: LocalityRow) => {
+    const count =
+      locationCounts.localityCounts[
+        `${row.city.trim().toLowerCase()}|${row.locality.trim().toLowerCase()}`
+      ] ?? row.propertiesCount
+    if (count > 0) {
+      window.alert(`${count} properties in this locality — remove or reassign first`)
+      return
+    }
+    setLocalities((prev) => prev.filter((x) => x.id !== row.id))
+    showToast('Locality deleted')
+  }
+
+  const saveZone = () => {
+    if (!zoneDraft.name.trim() || !zoneDraft.city.trim()) return
+    if (editingZoneId) {
+      setZones((prev) =>
+        prev.map((zone) =>
+          zone.id === editingZoneId
+            ? { ...zone, ...zoneDraft, name: zoneDraft.name.trim(), city: zoneDraft.city.trim() }
+            : zone,
+        ),
+      )
+    } else {
+      setZones((prev) => [
+        ...prev,
+        {
+          id: `z${Date.now()}`,
+          name: zoneDraft.name.trim(),
+          city: zoneDraft.city.trim(),
+          coordinates: zoneDraft.coordinates.trim(),
+          active: zoneDraft.active,
+        },
+      ])
+    }
+    setZoneFormOpen(false)
+    setEditingZoneId(null)
+    showToast('Map zone saved')
+  }
+
+  const deleteZone = (row: MapZone) => {
+    setZones((prev) => prev.filter((zone) => zone.id !== row.id))
+    showToast('Map zone deleted')
   }
 
   const createCoupon = () => {
@@ -6165,101 +6531,523 @@ export function ToolsPage() {
                   <div className="flex gap-2"><Button type="button" size="sm" onClick={saveCity}>Save</Button><Button type="button" size="sm" variant="outline" onClick={() => setCityFormOpen(false)}>Cancel</Button></div>
                 </div>
               )}
-              <table className="w-full text-sm">
-                <thead><tr className="border-b text-left text-xs uppercase text-muted-foreground"><th className="py-2">City</th><th>State</th><th>Properties</th><th>Active</th><th>Actions</th></tr></thead>
-                <tbody>
-                  {cities.map((c) => (
-                    <tr key={c.id} className="border-b border-border">
-                      <td className="py-2 font-medium">{c.city}</td><td>{c.state}</td><td>{c.propertiesCount}</td>
-                      <td>{c.active ? 'Active' : 'Inactive'}</td>
-                      <td className="space-x-2 py-2">
-                        <button type="button" className="text-primary text-xs" onClick={() => { setEditingCityId(c.id); setCityDraft({ city: c.city, state: c.state, active: c.active }); setCityFormOpen(true) }}>Edit</button>
-                        <button type="button" className="text-destructive text-xs" onClick={() => deleteCity(c)}>Delete</button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              {citiesWithCounts.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No cities yet. Add a city or import properties to seed locations automatically.</p>
+              ) : (
+                <table className="w-full text-sm">
+                  <thead><tr className="border-b text-left text-xs uppercase text-muted-foreground"><th className="py-2">City</th><th>State</th><th>Properties</th><th>Active</th><th>Actions</th></tr></thead>
+                  <tbody>
+                    {citiesWithCounts.map((c) => (
+                      <tr key={c.id} className="border-b border-border">
+                        <td className="py-2 font-medium">{c.city}</td><td>{c.state}</td><td>{c.propertiesCount}</td>
+                        <td>{c.active ? 'Active' : 'Inactive'}</td>
+                        <td className="space-x-2 py-2">
+                          <button type="button" className="text-primary text-xs" onClick={() => { setEditingCityId(c.id); setCityDraft({ city: c.city, state: c.state, active: c.active }); setCityFormOpen(true) }}>Edit</button>
+                          <button type="button" className="text-destructive text-xs" onClick={() => deleteCity(c)}>Delete</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
             </CardContent>
           </Card>
           <Card>
             <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2">
               <CardTitle className="text-base">Localities</CardTitle>
               <div className="flex gap-2">
-                <select value={localityCityFilter} onChange={(e) => setLocalityCityFilter(e.target.value)} className="h-8 rounded-md border border-border bg-input px-2 text-sm">
-                  {cities.map((c) => <option key={c.id} value={c.city}>{c.city}</option>)}
-                </select>
-                <Button type="button" size="sm" onClick={() => { setLocalityFormOpen(true); setEditingLocalityId(null); setLocalityDraft({ locality: '', city: localityCityFilter, active: true }) }}><Plus className="size-4" /> Add Locality</Button>
+                {cities.length > 0 && (
+                  <select value={effectiveLocalityCityFilter} onChange={(e) => setLocalityCityFilter(e.target.value)} className="h-8 rounded-md border border-border bg-input px-2 text-sm">
+                    {cities.map((c) => <option key={c.id} value={c.city}>{c.city}</option>)}
+                  </select>
+                )}
+                <Button type="button" size="sm" disabled={!cities.length} onClick={() => { setLocalityFormOpen(true); setEditingLocalityId(null); setLocalityDraft({ locality: '', city: effectiveLocalityCityFilter || cities[0]?.city || '', active: true }) }}><Plus className="size-4" /> Add Locality</Button>
               </div>
             </CardHeader>
             <CardContent>
-              {localityFormOpen && (
-                <div className="mb-4 space-y-2 rounded-lg border border-border p-4">
-                  <input placeholder="Locality" value={localityDraft.locality} onChange={(e) => setLocalityDraft((d) => ({ ...d, locality: e.target.value }))} className="h-9 w-full rounded-md border border-border bg-input px-3 text-sm" />
-                  <select value={localityDraft.city} onChange={(e) => setLocalityDraft((d) => ({ ...d, city: e.target.value }))} className="h-9 w-full rounded-md border border-border bg-input px-2 text-sm">{cities.map((c) => <option key={c.id} value={c.city}>{c.city}</option>)}</select>
-                  <label className="text-sm"><input type="checkbox" checked={localityDraft.active} onChange={(e) => setLocalityDraft((d) => ({ ...d, active: e.target.checked }))} /> Active</label>
-                  <div className="flex gap-2"><Button type="button" size="sm" onClick={saveLocality}>Save</Button><Button type="button" size="sm" variant="outline" onClick={() => setLocalityFormOpen(false)}>Cancel</Button></div>
-                </div>
+              {!cities.length ? (
+                <p className="text-sm text-muted-foreground">Add a city before managing localities.</p>
+              ) : (
+                <>
+                  {localityFormOpen && (
+                    <div className="mb-4 space-y-2 rounded-lg border border-border p-4">
+                      <input placeholder="Locality" value={localityDraft.locality} onChange={(e) => setLocalityDraft((d) => ({ ...d, locality: e.target.value }))} className="h-9 w-full rounded-md border border-border bg-input px-3 text-sm" />
+                      <select value={localityDraft.city || effectiveLocalityCityFilter} onChange={(e) => setLocalityDraft((d) => ({ ...d, city: e.target.value }))} className="h-9 w-full rounded-md border border-border bg-input px-2 text-sm">{cities.map((c) => <option key={c.id} value={c.city}>{c.city}</option>)}</select>
+                      <label className="text-sm"><input type="checkbox" checked={localityDraft.active} onChange={(e) => setLocalityDraft((d) => ({ ...d, active: e.target.checked }))} /> Active</label>
+                      <div className="flex gap-2"><Button type="button" size="sm" onClick={saveLocality}>Save</Button><Button type="button" size="sm" variant="outline" onClick={() => setLocalityFormOpen(false)}>Cancel</Button></div>
+                    </div>
+                  )}
+                  {filteredLocalities.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">No localities for {effectiveLocalityCityFilter || 'this city'} yet.</p>
+                  ) : (
+                    <table className="w-full text-sm">
+                      <thead><tr className="border-b text-left text-xs uppercase text-muted-foreground"><th className="py-2">Locality</th><th>City</th><th>Properties</th><th>Active</th><th>Actions</th></tr></thead>
+                      <tbody>
+                        {filteredLocalities.map((l) => (
+                          <tr key={l.id} className="border-b border-border">
+                            <td className="py-2 font-medium">{l.locality}</td><td>{l.city}</td><td>{l.propertiesCount}</td><td>{l.active ? 'Active' : 'Inactive'}</td>
+                            <td className="space-x-2 py-2">
+                              <button type="button" className="text-primary text-xs" onClick={() => { setEditingLocalityId(l.id); setLocalityDraft({ locality: l.locality, city: l.city, active: l.active }); setLocalityFormOpen(true) }}>Edit</button>
+                              <button type="button" className="text-destructive text-xs" onClick={() => deleteLocality(l)}>Delete</button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </>
               )}
-              <table className="w-full text-sm">
-                <thead><tr className="border-b text-left text-xs uppercase text-muted-foreground"><th className="py-2">Locality</th><th>City</th><th>Properties</th><th>Active</th><th>Actions</th></tr></thead>
-                <tbody>
-                  {filteredLocalities.map((l) => (
-                    <tr key={l.id} className="border-b border-border">
-                      <td className="py-2 font-medium">{l.locality}</td><td>{l.city}</td><td>{l.propertiesCount}</td><td>{l.active ? 'Active' : 'Inactive'}</td>
-                      <td className="space-x-2 py-2">
-                        <button type="button" className="text-primary text-xs" onClick={() => { setEditingLocalityId(l.id); setLocalityDraft({ locality: l.locality, city: l.city, active: l.active }); setLocalityFormOpen(true) }}>Edit</button>
-                        <button type="button" className="text-destructive text-xs" onClick={() => setLocalities((prev) => prev.filter((x) => x.id !== l.id))}>Delete</button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
             </CardContent>
           </Card>
           <Card>
-            <CardHeader><CardTitle className="text-base">Map Zones</CardTitle></CardHeader>
+            <CardHeader className="flex flex-row items-center justify-between">
+              <CardTitle className="text-base">Map Zones</CardTitle>
+              <Button type="button" size="sm" disabled={!cities.length} onClick={() => { setZoneFormOpen(true); setEditingZoneId(null); setZoneDraft({ name: '', city: effectiveLocalityCityFilter || cities[0]?.city || '', coordinates: '', active: true }) }}><Plus className="size-4" /> Add Zone</Button>
+            </CardHeader>
             <CardContent>
               <p className="mb-4 rounded-lg bg-muted p-4 text-sm text-muted-foreground">Map zones define searchable areas in the app map view (B-17)</p>
-              <table className="w-full text-sm">
-                <thead><tr className="border-b text-left text-xs uppercase text-muted-foreground"><th className="py-2">Zone Name</th><th>City</th><th>Coordinates</th><th>Active</th></tr></thead>
-                <tbody>{zones.map((z) => (<tr key={z.id} className="border-b"><td className="py-2 font-medium">{z.name}</td><td>{z.city}</td><td>{z.coordinates}</td><td>{z.active ? 'Active' : 'Inactive'}</td></tr>))}</tbody>
-              </table>
+              {zoneFormOpen && (
+                <div className="mb-4 space-y-2 rounded-lg border border-border p-4">
+                  <input placeholder="Zone name" value={zoneDraft.name} onChange={(e) => setZoneDraft((d) => ({ ...d, name: e.target.value }))} className="h-9 w-full rounded-md border border-border bg-input px-3 text-sm" />
+                  <select value={zoneDraft.city || effectiveLocalityCityFilter} onChange={(e) => setZoneDraft((d) => ({ ...d, city: e.target.value }))} className="h-9 w-full rounded-md border border-border bg-input px-2 text-sm">{cities.map((c) => <option key={c.id} value={c.city}>{c.city}</option>)}</select>
+                  <input placeholder="Coordinates (lat,lng or polygon)" value={zoneDraft.coordinates} onChange={(e) => setZoneDraft((d) => ({ ...d, coordinates: e.target.value }))} className="h-9 w-full rounded-md border border-border bg-input px-3 text-sm" />
+                  <label className="text-sm"><input type="checkbox" checked={zoneDraft.active} onChange={(e) => setZoneDraft((d) => ({ ...d, active: e.target.checked }))} /> Active</label>
+                  <div className="flex gap-2"><Button type="button" size="sm" onClick={saveZone}>Save</Button><Button type="button" size="sm" variant="outline" onClick={() => setZoneFormOpen(false)}>Cancel</Button></div>
+                </div>
+              )}
+              {zones.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No map zones yet. Add zones to power searchable areas in the customer app map.</p>
+              ) : (
+                <table className="w-full text-sm">
+                  <thead><tr className="border-b text-left text-xs uppercase text-muted-foreground"><th className="py-2">Zone Name</th><th>City</th><th>Coordinates</th><th>Active</th><th>Actions</th></tr></thead>
+                  <tbody>
+                    {zones.map((z) => (
+                      <tr key={z.id} className="border-b border-border">
+                        <td className="py-2 font-medium">{z.name}</td><td>{z.city}</td><td>{z.coordinates}</td><td>{z.active ? 'Active' : 'Inactive'}</td>
+                        <td className="space-x-2 py-2">
+                          <button type="button" className="text-primary text-xs" onClick={() => { setEditingZoneId(z.id); setZoneDraft({ name: z.name, city: z.city, coordinates: z.coordinates, active: z.active }); setZoneFormOpen(true) }}>Edit</button>
+                          <button type="button" className="text-destructive text-xs" onClick={() => deleteZone(z)}>Delete</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
             </CardContent>
           </Card>
         </div>
       )}
 
       {tab === 'pricing' && (
-        <div className="mx-auto max-w-[800px] space-y-8">
-          <Card>
-            <CardHeader><CardTitle className="text-base">Boost Plans</CardTitle><p className="text-xs text-muted-foreground">📱 App screen: SL-14</p></CardHeader>
-            <CardContent className="grid gap-4 md:grid-cols-3">
-              {boostPlans.map((plan, idx) => (
-                <div key={plan.id} className="rounded-lg border border-border p-4">
-                  <input value={plan.name} onChange={(e) => setBoostPlans((prev) => prev.map((p, i) => i === idx ? { ...p, name: e.target.value } : p))} className="mb-2 h-8 w-full rounded border border-border px-2 font-semibold" />
-                  <input value={plan.priceLabel} onChange={(e) => setBoostPlans((prev) => prev.map((p, i) => i === idx ? { ...p, priceLabel: e.target.value } : p))} className="mb-2 h-8 w-full rounded border border-border px-2 text-sm" placeholder="Price" />
-                  <textarea value={plan.description} onChange={(e) => setBoostPlans((prev) => prev.map((p, i) => i === idx ? { ...p, description: e.target.value } : p))} className="mb-2 min-h-[50px] w-full rounded border border-border px-2 text-sm" />
-                  {plan.benefits.map((b, bi) => (
-                    <input key={bi} value={b} onChange={(e) => setBoostPlans((prev) => prev.map((p, i) => i === idx ? { ...p, benefits: p.benefits.map((x, j) => j === bi ? e.target.value : x) } : p))} className="mb-1 h-7 w-full rounded border border-border px-2 text-xs" />
-                  ))}
-                  <label className="mt-2 flex text-xs"><input type="checkbox" checked={plan.active} onChange={() => setBoostPlans((prev) => prev.map((p, i) => i === idx ? { ...p, active: !p.active } : p))} /> Active</label>
-                  <Button type="button" size="sm" className="mt-2 w-full" onClick={() => showToast(`${plan.name} saved`)}>Save Changes</Button>
+        <div className="mx-auto max-w-[960px] space-y-6">
+          <div className="rounded-xl border border-border bg-gradient-to-br from-primary/5 via-card to-card p-6">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <p className="text-xs font-medium uppercase tracking-wide text-primary">
+                  Pricing &amp; Monetization
+                </p>
+                <h2 className="mt-1 text-xl font-semibold text-foreground">
+                  Manage boost plans, packages, and active orders
+                </h2>
+                <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
+                  Configure seller boost tiers shown in the app (SL-14), interior packages, coupon
+                  codes, and monitor featured listing boosts in one place.
+                </p>
+              </div>
+              <div className="grid grid-cols-3 gap-3">
+                <div className="rounded-lg border border-border bg-card px-4 py-3 text-center shadow-sm">
+                  <p className="text-2xl font-bold text-foreground">{boostOrderStats.total}</p>
+                  <p className="text-xs text-muted-foreground">Total orders</p>
                 </div>
-              ))}
+                <div className="rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-center shadow-sm dark:border-green-900 dark:bg-green-950/40">
+                  <p className="text-2xl font-bold text-green-700 dark:text-green-400">
+                    {boostOrderStats.active}
+                  </p>
+                  <p className="text-xs text-green-700/80 dark:text-green-400/80">Active</p>
+                </div>
+                <div className="rounded-lg border border-border bg-muted/40 px-4 py-3 text-center shadow-sm">
+                  <p className="text-2xl font-bold text-muted-foreground">
+                    {boostOrderStats.expired}
+                  </p>
+                  <p className="text-xs text-muted-foreground">Expired</p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <Card className="overflow-hidden border-primary/10">
+            <CardHeader className="border-b border-border bg-muted/30">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <CardTitle className="flex items-center gap-2 text-base">
+                    <Rocket className="size-5 text-primary" />
+                    Boost Plans
+                  </CardTitle>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    App screen: SL-14 · {boostPlans.filter((plan) => plan.active).length} active
+                    tiers
+                  </p>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent className="grid gap-4 p-6 md:grid-cols-3">
+              {boostPlans.length === 0 ? (
+                <p className="col-span-full rounded-lg border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
+                  No boost plans configured yet.
+                </p>
+              ) : (
+                boostPlans.map((plan, idx) => (
+                  <div
+                    key={plan.id}
+                    className={cn(
+                      'relative flex flex-col rounded-xl border bg-card p-5 shadow-sm transition-shadow hover:shadow-md',
+                      plan.active ? 'border-primary/20' : 'border-border opacity-80',
+                    )}
+                  >
+                    <div className="mb-3 flex items-start justify-between gap-2">
+                      <div>
+                        <input
+                          value={plan.name}
+                          onChange={(e) =>
+                            setBoostPlans((prev) =>
+                              prev.map((p, i) =>
+                                i === idx ? { ...p, name: e.target.value } : p,
+                              ),
+                            )
+                          }
+                          className="h-8 w-full rounded-md border border-transparent bg-transparent px-0 text-base font-semibold focus:border-border focus:bg-input focus:px-2"
+                        />
+                        <input
+                          value={plan.priceLabel}
+                          onChange={(e) =>
+                            setBoostPlans((prev) =>
+                              prev.map((p, i) =>
+                                i === idx ? { ...p, priceLabel: e.target.value } : p,
+                              ),
+                            )
+                          }
+                          className="mt-1 h-7 w-full rounded-md border border-transparent bg-transparent px-0 text-sm font-medium text-primary focus:border-border focus:bg-input focus:px-2"
+                          placeholder="Price"
+                        />
+                      </div>
+                      <Badge variant={plan.active ? 'default' : 'secondary'}>
+                        {plan.active ? 'Live' : 'Hidden'}
+                      </Badge>
+                    </div>
+                    <textarea
+                      value={plan.description}
+                      onChange={(e) =>
+                        setBoostPlans((prev) =>
+                          prev.map((p, i) =>
+                            i === idx ? { ...p, description: e.target.value } : p,
+                          ),
+                        )
+                      }
+                      className="mb-3 min-h-[52px] w-full rounded-md border border-border bg-input/50 px-3 py-2 text-sm"
+                    />
+                    <div className="mb-4 space-y-1.5">
+                      <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                        Benefits
+                      </p>
+                      {plan.benefits.map((benefit, bi) => (
+                        <input
+                          key={bi}
+                          value={benefit}
+                          onChange={(e) =>
+                            setBoostPlans((prev) =>
+                              prev.map((p, i) =>
+                                i === idx
+                                  ? {
+                                      ...p,
+                                      benefits: p.benefits.map((x, j) =>
+                                        j === bi ? e.target.value : x,
+                                      ),
+                                    }
+                                  : p,
+                              ),
+                            )
+                          }
+                          className="h-8 w-full rounded-md border border-border bg-input px-2 text-xs"
+                        />
+                      ))}
+                    </div>
+                    <label className="mb-3 flex items-center gap-2 text-xs text-muted-foreground">
+                      <input
+                        type="checkbox"
+                        checked={plan.active}
+                        onChange={() =>
+                          setBoostPlans((prev) =>
+                            prev.map((p, i) => (i === idx ? { ...p, active: !p.active } : p)),
+                          )
+                        }
+                      />
+                      Show in app
+                    </label>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="mt-auto w-full"
+                      onClick={() => showToast(`${plan.name} saved`)}
+                    >
+                      Save plan
+                    </Button>
+                  </div>
+                ))
+              )}
             </CardContent>
           </Card>
+
           <Card>
-            <CardHeader className="flex flex-row justify-between"><CardTitle className="text-base">Interior Design Packages</CardTitle><Button type="button" size="sm" variant="outline" onClick={() => setInteriorPkgs((prev) => [...prev, { id: `i${Date.now()}`, name: 'New', priceRange: '', timeline: '', active: true }])}>Add</Button></CardHeader>
-            <CardContent className="overflow-x-auto">
-              <table className="w-full text-sm"><thead><tr className="border-b text-xs uppercase text-muted-foreground"><th className="py-2 text-left">Package</th><th>Price Range</th><th>Timeline</th><th>Active</th><th></th></tr></thead>
-                <tbody>{interiorPkgs.map((p, i) => (<tr key={p.id} className="border-b"><td className="py-2"><input value={p.name} onChange={(e) => setInteriorPkgs((prev) => prev.map((x, j) => j === i ? { ...x, name: e.target.value } : x))} className="h-8 rounded border px-2" /></td><td><input value={p.priceRange} onChange={(e) => setInteriorPkgs((prev) => prev.map((x, j) => j === i ? { ...x, priceRange: e.target.value } : x))} className="h-8 rounded border px-2" /></td><td><input value={p.timeline} onChange={(e) => setInteriorPkgs((prev) => prev.map((x, j) => j === i ? { ...x, timeline: e.target.value } : x))} className="h-8 rounded border px-2" /></td><td><input type="checkbox" checked={p.active} onChange={() => setInteriorPkgs((prev) => prev.map((x, j) => j === i ? { ...x, active: !x.active } : x))} /></td><td><button type="button" className="text-destructive text-xs" onClick={() => setInteriorPkgs((prev) => prev.filter((x) => x.id !== p.id))}>Delete</button></td></tr>))}</tbody>
-              </table>
+            <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2 border-b border-border bg-muted/20">
+              <div>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Sparkles className="size-5 text-amber-500" />
+                  Active Boost Orders
+                </CardTitle>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Live featured listings with a {BOOST_DURATION_DAYS}-day boost window
+                </p>
+              </div>
+              <div className="flex rounded-lg border border-border bg-muted/50 p-1">
+                {(['all', 'active', 'expired'] as const).map((filter) => (
+                  <button
+                    key={filter}
+                    type="button"
+                    className={cn(
+                      'rounded-md px-3 py-1.5 text-xs font-medium capitalize transition-colors',
+                      boostOrderFilter === filter
+                        ? 'bg-card text-foreground shadow-sm'
+                        : 'text-muted-foreground hover:text-foreground',
+                    )}
+                    onClick={() => setBoostOrderFilter(filter)}
+                  >
+                    {filter}
+                    <span className="ml-1.5 text-[10px] text-muted-foreground">
+                      (
+                      {filter === 'all'
+                        ? boostOrderStats.total
+                        : filter === 'active'
+                          ? boostOrderStats.active
+                          : boostOrderStats.expired}
+                      )
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </CardHeader>
+            <CardContent className="overflow-x-auto p-0">
+              {filteredBoostOrders.length === 0 ? (
+                <div className="flex flex-col items-center justify-center px-6 py-14 text-center">
+                  <div className="mb-3 flex size-12 items-center justify-center rounded-full bg-muted">
+                    <Rocket className="size-5 text-muted-foreground" />
+                  </div>
+                  <p className="font-medium text-foreground">No boost orders found</p>
+                  <p className="mt-1 max-w-sm text-sm text-muted-foreground">
+                    {boostOrderFilter === 'active'
+                      ? 'Featured properties will appear here as active boosts. Mark a property as featured from App Content → Home Screen.'
+                      : boostOrderFilter === 'expired'
+                        ? 'Expired or deactivated boosts will show up here.'
+                        : 'Boost orders are created when properties are featured in the app.'}
+                  </p>
+                </div>
+              ) : (
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b bg-muted/30 text-left text-xs uppercase tracking-wide text-muted-foreground">
+                      <th className="px-4 py-3">Property</th>
+                      <th className="px-4 py-3">Plan</th>
+                      <th className="px-4 py-3">Started</th>
+                      <th className="px-4 py-3">Expires</th>
+                      <th className="px-4 py-3">Days left</th>
+                      <th className="px-4 py-3">Status</th>
+                      <th className="px-4 py-3">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredBoostOrders.map((order) => (
+                      <tr
+                        key={order.id}
+                        className="border-b border-border transition-colors hover:bg-muted/20"
+                      >
+                        <td className="px-4 py-3">
+                          <p className="font-medium text-foreground">{order.property}</p>
+                        </td>
+                        <td className="px-4 py-3">
+                          <Badge variant="outline" className="font-normal">
+                            {order.plan}
+                          </Badge>
+                        </td>
+                        <td className="px-4 py-3 text-muted-foreground">{order.started}</td>
+                        <td className="px-4 py-3 text-muted-foreground">{order.expires}</td>
+                        <td className="px-4 py-3">
+                          {order.status === 'expired' ? (
+                            <span className="text-muted-foreground">—</span>
+                          ) : (
+                            <span
+                              className={cn(
+                                'font-medium',
+                                order.daysLeft <= 2 ? 'text-amber-600' : 'text-foreground',
+                              )}
+                            >
+                              {order.daysLeft} days
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3">
+                          <span
+                            className={cn(
+                              'inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium',
+                              order.status === 'active'
+                                ? 'bg-green-100 text-green-800 dark:bg-green-950 dark:text-green-300'
+                                : 'bg-muted text-muted-foreground',
+                            )}
+                          >
+                            {order.status === 'active' ? 'Active' : 'Expired'}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3">
+                          {order.status === 'active' ? (
+                            <button
+                              type="button"
+                              className="text-xs font-medium text-destructive hover:underline disabled:opacity-50"
+                              disabled={boostOrderActionId === order.id}
+                              onClick={() => void deactivateBoostOrder(order)}
+                            >
+                              {boostOrderActionId === order.id ? 'Deactivating…' : 'Deactivate'}
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              className="text-xs font-medium text-primary hover:underline"
+                              onClick={() =>
+                                showToast('Renew boost — open boost modal (SL-14)')
+                              }
+                            >
+                              Renew
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
             </CardContent>
           </Card>
+
+          <Card>
+            <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2">
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Package className="size-5 text-blue-600" />
+                Interior Design Packages
+              </CardTitle>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() =>
+                  setInteriorPkgs((prev) => [
+                    ...prev,
+                    { id: `i${Date.now()}`, name: 'New', priceRange: '', timeline: '', active: true },
+                  ])
+                }
+              >
+                <Plus className="size-4" /> Add package
+              </Button>
+            </CardHeader>
+            <CardContent className="overflow-x-auto">
+              {interiorPkgs.length === 0 ? (
+                <p className="rounded-lg border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
+                  No interior packages yet.
+                </p>
+              ) : (
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b text-xs uppercase text-muted-foreground">
+                      <th className="py-2 text-left">Package</th>
+                      <th>Price range</th>
+                      <th>Timeline</th>
+                      <th>Active</th>
+                      <th />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {interiorPkgs.map((pkg, i) => (
+                      <tr key={pkg.id} className="border-b border-border">
+                        <td className="py-2">
+                          <input
+                            value={pkg.name}
+                            onChange={(e) =>
+                              setInteriorPkgs((prev) =>
+                                prev.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)),
+                              )
+                            }
+                            className="h-8 w-full min-w-[120px] rounded-md border border-border bg-input px-2"
+                          />
+                        </td>
+                        <td>
+                          <input
+                            value={pkg.priceRange}
+                            onChange={(e) =>
+                              setInteriorPkgs((prev) =>
+                                prev.map((x, j) =>
+                                  j === i ? { ...x, priceRange: e.target.value } : x,
+                                ),
+                              )
+                            }
+                            className="h-8 w-full min-w-[100px] rounded-md border border-border bg-input px-2"
+                          />
+                        </td>
+                        <td>
+                          <input
+                            value={pkg.timeline}
+                            onChange={(e) =>
+                              setInteriorPkgs((prev) =>
+                                prev.map((x, j) =>
+                                  j === i ? { ...x, timeline: e.target.value } : x,
+                                ),
+                              )
+                            }
+                            className="h-8 w-full min-w-[90px] rounded-md border border-border bg-input px-2"
+                          />
+                        </td>
+                        <td>
+                          <input
+                            type="checkbox"
+                            checked={pkg.active}
+                            onChange={() =>
+                              setInteriorPkgs((prev) =>
+                                prev.map((x, j) => (j === i ? { ...x, active: !x.active } : x)),
+                              )
+                            }
+                          />
+                        </td>
+                        <td>
+                          <button
+                            type="button"
+                            className="text-destructive text-xs hover:underline"
+                            onClick={() =>
+                              setInteriorPkgs((prev) => prev.filter((x) => x.id !== pkg.id))
+                            }
+                          >
+                            Delete
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </CardContent>
+          </Card>
+
           <Card>
             <CardHeader className="flex flex-row items-center justify-between">
-              <CardTitle className="text-base">Interior Designers</CardTitle>
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Tag className="size-5 text-violet-600" />
+                Interior Designers
+              </CardTitle>
               <Button
                 type="button"
                 size="sm"
@@ -6404,10 +7192,18 @@ export function ToolsPage() {
             </CardContent>
           </Card>
           <Card>
-            <CardHeader className="flex flex-row justify-between"><CardTitle className="text-base">Coupon Codes</CardTitle><Button type="button" size="sm" onClick={() => setCouponFormOpen(true)}><Plus className="size-4" /> Create Coupon</Button></CardHeader>
+            <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2">
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Ticket className="size-5 text-emerald-600" />
+                Coupon Codes
+              </CardTitle>
+              <Button type="button" size="sm" onClick={() => setCouponFormOpen(true)}>
+                <Plus className="size-4" /> Create coupon
+              </Button>
+            </CardHeader>
             <CardContent>
               {couponFormOpen && (
-                <div className="mb-4 grid gap-2 rounded-lg border border-border p-4 sm:grid-cols-2">
+                <div className="mb-4 grid gap-2 rounded-lg border border-border bg-muted/20 p-4 sm:grid-cols-2">
                   <input placeholder="CODE" value={couponDraft.code} onChange={(e) => setCouponDraft((d) => ({ ...d, code: e.target.value.toUpperCase() }))} className="h-9 rounded-md border border-border bg-input px-3 text-sm uppercase" />
                   <select value={couponDraft.discountType} onChange={(e) => setCouponDraft((d) => ({ ...d, discountType: e.target.value as '%' | 'flat' }))} className="h-9 rounded-md border border-border bg-input px-2 text-sm"><option value="%">% discount</option><option value="flat">Flat ₹</option></select>
                   <input placeholder="Value" value={couponDraft.discountValue} onChange={(e) => setCouponDraft((d) => ({ ...d, discountValue: e.target.value }))} className="h-9 rounded-md border border-border bg-input px-3 text-sm" />
@@ -6418,106 +7214,42 @@ export function ToolsPage() {
                   <Button type="button" onClick={createCoupon}>Create</Button>
                 </div>
               )}
-              <table className="w-full text-sm"><thead><tr className="border-b text-xs uppercase text-muted-foreground"><th className="py-2 text-left">Code</th><th>Discount</th><th>Type</th><th>Applies To</th><th>Uses</th><th>Expiry</th><th>Active</th></tr></thead>
-                <tbody>{coupons.map((c) => (<tr key={c.id} className="border-b"><td className="py-2 font-mono font-medium">{c.code}</td><td>{c.discount}</td><td>{c.type}</td><td>{c.appliesTo}</td><td>{c.uses}</td><td>{c.expiry}</td><td>{c.active ? 'Yes' : 'No'}</td></tr>))}</tbody>
-              </table>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2">
-              <CardTitle className="text-base">Active Boost Orders</CardTitle>
-              <div className="flex gap-1">
-                {(['all', 'active', 'expired'] as const).map((f) => (
-                  <button
-                    key={f}
-                    type="button"
-                    className={cn(
-                      'rounded-full px-3 py-1 text-xs font-medium capitalize',
-                      boostOrderFilter === f
-                        ? 'bg-primary text-primary-foreground'
-                        : 'bg-muted text-muted-foreground',
-                    )}
-                    onClick={() => setBoostOrderFilter(f)}
-                  >
-                    {f}
-                  </button>
-                ))}
-              </div>
-            </CardHeader>
-            <CardContent className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b text-xs uppercase text-muted-foreground">
-                    <th className="py-2 text-left">Property</th>
-                    <th>Plan</th>
-                    <th>Started</th>
-                    <th>Expires</th>
-                    <th>Days Left</th>
-                    <th>Status</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {boostOrders
-                    .filter(
-                      (o) =>
-                        boostOrderFilter === 'all' || o.status === boostOrderFilter,
-                    )
-                    .map((o) => (
-                      <tr key={o.id} className="border-b">
-                        <td className="py-2 font-medium">{o.property}</td>
-                        <td>{o.plan}</td>
-                        <td>{o.started}</td>
-                        <td>{o.expires}</td>
-                        <td>{o.status === 'expired' ? '—' : `${o.daysLeft} days`}</td>
+              {coupons.length === 0 ? (
+                <p className="rounded-lg border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
+                  No coupon codes yet.
+                </p>
+              ) : (
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b text-xs uppercase text-muted-foreground">
+                      <th className="py-2 text-left">Code</th>
+                      <th>Discount</th>
+                      <th>Type</th>
+                      <th>Applies to</th>
+                      <th>Uses</th>
+                      <th>Expiry</th>
+                      <th>Active</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {coupons.map((c) => (
+                      <tr key={c.id} className="border-b border-border">
+                        <td className="py-2 font-mono font-medium">{c.code}</td>
+                        <td>{c.discount}</td>
+                        <td>{c.type}</td>
+                        <td>{c.appliesTo}</td>
+                        <td>{c.uses}</td>
+                        <td>{c.expiry}</td>
                         <td>
-                          <span
-                            className={cn(
-                              'rounded-full px-2 py-0.5 text-xs font-medium',
-                              o.status === 'active'
-                                ? 'bg-green-100 text-green-800'
-                                : 'bg-muted text-muted-foreground',
-                            )}
-                          >
-                            {o.status === 'active' ? 'Active' : 'Expired'}
-                          </span>
-                        </td>
-                        <td>
-                          {o.status === 'active' ? (
-                            <button
-                              type="button"
-                              className="text-xs text-destructive hover:underline"
-                              onClick={() => {
-                                if (
-                                  window.confirm(
-                                    `Deactivate boost for ${o.property}?`,
-                                  )
-                                ) {
-                                  setBoostOrders((prev) =>
-                                    prev.filter((x) => x.id !== o.id),
-                                  )
-                                  showToast('Boost deactivated')
-                                }
-                              }}
-                            >
-                              Deactivate
-                            </button>
-                          ) : (
-                            <button
-                              type="button"
-                              className="text-xs text-primary hover:underline"
-                              onClick={() =>
-                                showToast('Renew boost — open boost modal (SL-14)')
-                              }
-                            >
-                              Renew
-                            </button>
-                          )}
+                          <Badge variant={c.active ? 'default' : 'secondary'}>
+                            {c.active ? 'Yes' : 'No'}
+                          </Badge>
                         </td>
                       </tr>
                     ))}
-                </tbody>
-              </table>
+                  </tbody>
+                </table>
+              )}
             </CardContent>
           </Card>
         </div>
@@ -6780,7 +7512,6 @@ export function ToolsPage() {
                 { key: 'buyers', label: `All Buyers (${countBuyers(users)} users)` },
                 { key: 'sellers', label: `All Sellers (${countSellers(users)} users)` },
                 { key: 'nri', label: `NRI Users (${countNri(users)} users)` },
-                { key: 'kyc', label: `KYC Verified Only (${countKycVerified(users)} users)` },
                 { key: 'custom', label: 'Custom Filter' },
               ].map((opt) => (
                 <label key={opt.key} className="flex cursor-pointer items-center gap-2 rounded-lg border border-border p-3 text-sm has-[:checked]:border-primary has-[:checked]:bg-primary/5">

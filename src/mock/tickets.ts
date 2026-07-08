@@ -42,7 +42,7 @@ export const CATEGORY_LABELS: Record<TicketCategory, string> = {
   property_inquiry: 'Property Inquiry',
   payment: 'Payment',
   technical: 'Technical',
-  kyc: 'KYC',
+  kyc: 'General',
   general: 'General',
   complaint: 'Complaint',
 }

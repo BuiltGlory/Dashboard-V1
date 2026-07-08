@@ -19,10 +19,11 @@ import {
 import { readAdminSession } from '@/api/admin'
 import { createWorkflowLog, deleteWorkflowLog, listWorkflowLogs, type WorkflowLog } from '@/api/adminWorkflow'
 import { cn } from '@/lib/utils'
+import { NOTIFICATION_TEMPLATES, sendPushNotification } from '@/utils/notifications'
 
 export interface SalesDocumentationStageProps {
   deal: SalesDeal
-  onStageChange: (stage: SalesStage, patch?: Partial<SalesDeal>) => void
+  onStageChange: (stage: SalesStage, patch?: Partial<SalesDeal>) => boolean | Promise<boolean>
 }
 
 interface RegistrationDetails {
@@ -474,6 +475,13 @@ export function SalesDocumentationStage({ deal, onStageChange }: SalesDocumentat
     setRegistration(nextRegistration)
     void persistDocumentationPatch({ registration: nextRegistration })
     setEditingRegistration(false)
+    const template = NOTIFICATION_TEMPLATES.N08_REGISTRATION(deal.buyerName, 'buyer')
+    sendPushNotification(deal.buyerName, template, 'N-08', {
+      dedupeKey: `N-08:buyer:${deal.id}:${regDate}`,
+      audience: 'buyer',
+      userId: deal.buyerUserId,
+      relatedTo: { type: 'deal', id: deal.id },
+    })
   }
 
   const startEditRegistration = () => {
@@ -551,9 +559,9 @@ export function SalesDocumentationStage({ deal, onStageChange }: SalesDocumentat
     }
   }
 
-  const closeDeal = () => {
-    onStageChange('closed', { closedAt: new Date().toISOString() })
-    navigate('/admin/sales/closed')
+  const closeDeal = async () => {
+    const closed = await onStageChange('closed', { closedAt: new Date().toISOString() })
+    if (closed) navigate('/admin/sales/closed')
   }
 
   return (

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router'
 import {
   AlertCircle,
@@ -20,6 +20,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import {
+  canRescheduleVisit,
   findVisitConflicts,
   formatDateKey,
   getWeekStart,
@@ -34,7 +35,7 @@ import {
   type VisitStatus,
   type VisitType,
 } from '@/api/adminEnquiries'
-import { readAdminSession } from '@/api/admin'
+import { formatAdminApiError, readAdminSession } from '@/api/admin'
 import { handleCall } from '@/utils/adminActions'
 import { cn } from '@/lib/utils'
 
@@ -68,6 +69,13 @@ const STATUS_LABELS: Record<VisitStatus, string> = {
   missed: 'Missed',
   rescheduled: 'Rescheduled',
 }
+
+const DEFAULT_RESCHEDULE_REASONS = [
+  'Buyer request',
+  'Admin schedule conflict',
+  'Property not ready',
+  'Other',
+]
 
 const DATE_FILTERS: { key: DateFilter; label: string }[] = [
   { key: 'today', label: 'Today' },
@@ -193,12 +201,24 @@ function CalendarSkeleton() {
   )
 }
 
+function ModalShell({ children, onClose }: { children: ReactNode; onClose: () => void }) {
+  return (
+    <>
+      <button type="button" className="fixed inset-0 z-50 bg-black/50" aria-label="Close" onClick={onClose} />
+      <div className="fixed left-1/2 top-1/2 z-50 max-h-[90vh] w-full max-w-md -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-xl border border-border bg-card p-6 shadow-xl">
+        {children}
+      </div>
+    </>
+  )
+}
+
 function VisitsTable({
   visits,
   allVisits,
   onView,
   onConfirm,
   onCopyPhone,
+  onReschedule,
   onMarkCompleted,
   onMarkMissed,
 }: {
@@ -207,6 +227,7 @@ function VisitsTable({
   onView: (v: Visit) => void
   onConfirm: (v: Visit) => void
   onCopyPhone: (phone: string) => void
+  onReschedule: (v: Visit) => void
   onMarkCompleted: (v: Visit) => void
   onMarkMissed: (v: Visit) => void
 }) {
@@ -259,7 +280,10 @@ function VisitsTable({
                     <button
                       type="button"
                       className="text-xs text-muted-foreground hover:text-primary"
-                      onClick={() => onCopyPhone(visit.buyerPhone)}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        onCopyPhone(visit.buyerPhone)
+                      }}
                     >
                       {visit.buyerPhone}
                     </button>
@@ -307,31 +331,73 @@ function VisitsTable({
               <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
                 <div className="flex flex-wrap items-center gap-1">
                   {visit.status === 'scheduled' && (
-                    <Button variant="outline" size="sm" onClick={() => onConfirm(visit)}>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        onConfirm(visit)
+                      }}
+                    >
                       <Check className="size-3" /> Confirm
                     </Button>
                   )}
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => handleCall(visit.buyerPhone)}
+                    aria-label="Call buyer"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      handleCall(visit.buyerPhone)
+                    }}
                   >
                     <Phone className="size-3" />
                   </Button>
-                  <Button variant="outline" size="sm" onClick={() => onView(visit)} title="Reschedule">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    title="Reschedule"
+                    aria-label="Reschedule visit"
+                    disabled={!canRescheduleVisit(visit.status)}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      onReschedule(visit)
+                    }}
+                  >
                     <RotateCcw className="size-3" />
                   </Button>
                   {overdue && (
                     <>
-                      <Button variant="outline" size="sm" onClick={() => onMarkCompleted(visit)}>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          onMarkCompleted(visit)
+                        }}
+                      >
                         Complete
                       </Button>
-                      <Button variant="outline" size="sm" onClick={() => onMarkMissed(visit)}>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          onMarkMissed(visit)
+                        }}
+                      >
                         Missed
                       </Button>
                     </>
                   )}
-                  <Button variant="outline" size="sm" onClick={() => onView(visit)}>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      onView(visit)
+                    }}
+                  >
                     View
                   </Button>
                 </div>
@@ -450,6 +516,10 @@ export function VisitsPage() {
   const [view, setView] = useState<ViewMode>('list')
   const [weekStart, setWeekStart] = useState(() => getWeekStart(new Date(VISITS_TODAY)))
   const [toast, setToast] = useState<string | null>(null)
+  const [rescheduleVisit, setRescheduleVisit] = useState<Visit | null>(null)
+  const [rescheduleDate, setRescheduleDate] = useState('')
+  const [rescheduleTime, setRescheduleTime] = useState('10:00 AM')
+  const [rescheduleReason, setRescheduleReason] = useState(DEFAULT_RESCHEDULE_REASONS[0])
 
   const loadVisits = useCallback(async () => {
     const session = readAdminSession()
@@ -466,7 +536,7 @@ export function VisitsPage() {
       const result = await listAdminVisits(session.accessToken)
       setVisits(result.data)
     } catch (error) {
-      setLoadError(error instanceof Error ? error.message : 'Unable to load visits.')
+      setLoadError(formatAdminApiError(error, 'Unable to load visits.'))
       setVisits([])
     } finally {
       setLoading(false)
@@ -554,10 +624,10 @@ export function VisitsPage() {
       return
     }
     try {
-      const updated = await updateAdminVisitStatus(session.accessToken, visit.id, { status: 'confirmed' })
-      setVisits((prev) => prev.map((v) => (v.id === visit.id ? updated : v)))
+      await updateAdminVisitStatus(session.accessToken, visit.id, { status: 'confirmed' })
+      await loadVisits()
     } catch (error) {
-      setToast(error instanceof Error ? error.message : 'Unable to confirm visit')
+      setToast(formatAdminApiError(error, 'Unable to confirm visit'))
       return
     }
     const link = getVisitMeetingLink(visit)
@@ -568,7 +638,7 @@ export function VisitsPage() {
     )
     window.open(`https://wa.me/${phoneForWhatsApp(visit.buyerPhone)}?text=${msg}`, '_blank')
     setToast('Visit confirmed')
-  }, [])
+  }, [loadVisits])
 
   const handleCopyPhone = useCallback((phone: string) => {
     void navigator.clipboard.writeText(phone)
@@ -587,7 +657,7 @@ export function VisitsPage() {
       return
     }
     try {
-      const updated = await updateAdminVisitStatus(session.accessToken, visit.id, {
+      await updateAdminVisitStatus(session.accessToken, visit.id, {
         status: 'completed',
         feedback: {
           buyerInterest: 'interested',
@@ -595,12 +665,49 @@ export function VisitsPage() {
           nextAction: 'follow_up',
         },
       })
-      setVisits((prev) => prev.map((v) => (v.id === visit.id ? updated : v)))
+      await loadVisits()
       setToast('Visit marked completed')
     } catch (error) {
-      setToast(error instanceof Error ? error.message : 'Unable to mark visit completed')
+      setToast(formatAdminApiError(error, 'Unable to mark visit completed'))
     }
+  }, [loadVisits])
+
+  const openReschedule = useCallback((visit: Visit) => {
+    if (!canRescheduleVisit(visit.status)) {
+      setToast('This visit cannot be rescheduled')
+      return
+    }
+    setRescheduleVisit(visit)
+    setRescheduleDate(visit.visitDate)
+    setRescheduleTime(visit.visitTime)
+    setRescheduleReason(DEFAULT_RESCHEDULE_REASONS[0])
   }, [])
+
+  const submitReschedule = useCallback(async () => {
+    if (!rescheduleVisit || !rescheduleDate) return
+    const session = readAdminSession()
+    if (!session?.accessToken) {
+      setToast('Your admin session has expired. Please log in again.')
+      return
+    }
+    try {
+      await updateAdminVisitStatus(session.accessToken, rescheduleVisit.id, {
+        status: 'rescheduled',
+        visitDate: rescheduleDate,
+        visitTime: rescheduleTime,
+        reason: rescheduleReason,
+      })
+      await loadVisits()
+      const msg = encodeURIComponent(
+        `Hi ${rescheduleVisit.buyerName}, your visit for ${rescheduleVisit.propertyTitle} has been rescheduled to ${rescheduleDate} at ${rescheduleTime}`,
+      )
+      window.open(`https://wa.me/${phoneForWhatsApp(rescheduleVisit.buyerPhone)}?text=${msg}`, '_blank')
+      setRescheduleVisit(null)
+      setToast('Visit rescheduled')
+    } catch (error) {
+      setToast(formatAdminApiError(error, 'Unable to reschedule visit'))
+    }
+  }, [rescheduleVisit, rescheduleDate, rescheduleTime, rescheduleReason, loadVisits])
 
   const handleMarkMissed = useCallback(async (visit: Visit) => {
     const session = readAdminSession()
@@ -609,16 +716,16 @@ export function VisitsPage() {
       return
     }
     try {
-      const updated = await updateAdminVisitStatus(session.accessToken, visit.id, {
+      await updateAdminVisitStatus(session.accessToken, visit.id, {
         status: 'missed',
         reason: 'Marked missed from visit list.',
       })
-      setVisits((prev) => prev.map((v) => (v.id === visit.id ? updated : v)))
+      await loadVisits()
       setToast('Visit marked as missed (no show)')
     } catch (error) {
-      setToast(error instanceof Error ? error.message : 'Unable to mark visit missed')
+      setToast(formatAdminApiError(error, 'Unable to mark visit missed'))
     }
-  }, [])
+  }, [loadVisits])
 
   const showEmptyAll = !loading && visits.length === 0
   const showEmptySearch = !loading && visits.length > 0 && filtered.length === 0 && search.trim()
@@ -884,9 +991,49 @@ export function VisitsPage() {
           onView={(v) => navigate(`/admin/visits/${v.id}`)}
           onConfirm={handleConfirm}
           onCopyPhone={handleCopyPhone}
+          onReschedule={openReschedule}
           onMarkCompleted={handleMarkCompleted}
           onMarkMissed={handleMarkMissed}
         />
+      )}
+
+      {rescheduleVisit && (
+        <ModalShell onClose={() => setRescheduleVisit(null)}>
+          <h3 className="text-lg font-semibold">Reschedule visit</h3>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {rescheduleVisit.buyerName} — {rescheduleVisit.propertyTitle}
+          </p>
+          <input
+            type="date"
+            value={rescheduleDate}
+            onChange={(e) => setRescheduleDate(e.target.value)}
+            className="mt-3 h-9 w-full rounded-md border border-border bg-input px-3 text-sm"
+          />
+          <input
+            type="text"
+            value={rescheduleTime}
+            onChange={(e) => setRescheduleTime(e.target.value)}
+            placeholder="10:00 AM"
+            className="mt-2 h-9 w-full rounded-md border border-border bg-input px-3 text-sm"
+          />
+          <select
+            value={rescheduleReason}
+            onChange={(e) => setRescheduleReason(e.target.value)}
+            className="mt-2 h-9 w-full rounded-md border border-border bg-card px-3 text-sm"
+          >
+            {DEFAULT_RESCHEDULE_REASONS.map((r) => (
+              <option key={r}>{r}</option>
+            ))}
+          </select>
+          <div className="mt-4 flex gap-2">
+            <Button variant="outline" className="flex-1" onClick={() => setRescheduleVisit(null)}>
+              Cancel
+            </Button>
+            <Button className="flex-1" disabled={!rescheduleDate} onClick={() => void submitReschedule()}>
+              Reschedule
+            </Button>
+          </div>
+        </ModalShell>
       )}
 
       {!loading && !loadError && filtered.length > 0 && view === 'calendar' && (

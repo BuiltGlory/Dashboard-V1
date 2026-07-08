@@ -638,12 +638,12 @@ export function SalesDealDetailPage() {
   }, [toast])
 
   const updateDeal = useCallback(
-    async (patch: Partial<SalesDeal>) => {
-      if (!deal) return
+    async (patch: Partial<SalesDeal>): Promise<boolean> => {
+      if (!deal) return false
       const session = readAdminSession()
       if (!session?.accessToken) {
         setToast('Admin session expired. Please sign in again.')
-        return
+        return false
       }
 
       const hasOfferPatch = patch.offeredPrice !== undefined || patch.agreedPrice !== undefined
@@ -658,7 +658,7 @@ export function SalesDealDetailPage() {
       const hasSupportedPatch = hasOfferPatch || hasTokenPatch || hasPaymentPatch || stageChanged
       if (!hasSupportedPatch) {
         setToast('This action needs a sales deal update endpoint from backend.')
-        return
+        return false
       }
 
       setSaving(true)
@@ -708,8 +708,10 @@ export function SalesDealDetailPage() {
         }
         setDeal(saved)
         setToast('Deal updated')
+        return true
       } catch (error) {
         setToast(error instanceof Error ? error.message : 'Unable to update deal.')
+        return false
       } finally {
         setSaving(false)
       }

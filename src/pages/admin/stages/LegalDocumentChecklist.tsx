@@ -188,16 +188,6 @@ export const DOCUMENT_CATEGORIES = [
       { id: 'forest_boundary', name: 'Forest Boundary Demarcation' },
     ],
   },
-  {
-    id: 'kyc',
-    title: '13. Identity & KYC',
-    documents: [
-      { id: 'seller_id', name: 'Seller Identity Proof' },
-      { id: 'buyer_id', name: 'Buyer Identity Proof' },
-      { id: 'pan_both', name: 'PAN Card (Both Parties)' },
-      { id: 'aadhar_both', name: 'Aadhaar (Both Parties)' },
-    ],
-  },
 ] as const
 
 /** Documents admin prepares and sends to buyer (Sales Pipeline). */
@@ -254,7 +244,6 @@ export const CATEGORY_IDS_BY_PROPERTY_TYPE: Record<string, string[]> = {
     'family_succession',
     'loan_encumbrance',
     'court_records',
-    'kyc',
   ],
   villa: [
     'registration',
@@ -265,7 +254,6 @@ export const CATEGORY_IDS_BY_PROPERTY_TYPE: Record<string, string[]> = {
     'loan_encumbrance',
     'court_records',
     'environmental',
-    'kyc',
   ],
   house: [
     'registration',
@@ -275,7 +263,6 @@ export const CATEGORY_IDS_BY_PROPERTY_TYPE: Record<string, string[]> = {
     'family_succession',
     'loan_encumbrance',
     'court_records',
-    'kyc',
   ],
   penthouse: [
     'registration',
@@ -285,7 +272,6 @@ export const CATEGORY_IDS_BY_PROPERTY_TYPE: Record<string, string[]> = {
     'family_succession',
     'loan_encumbrance',
     'court_records',
-    'kyc',
   ],
   studio: [
     'registration',
@@ -294,7 +280,6 @@ export const CATEGORY_IDS_BY_PROPERTY_TYPE: Record<string, string[]> = {
     'tax_utility',
     'loan_encumbrance',
     'court_records',
-    'kyc',
   ],
   plot: [
     'registration',
@@ -304,7 +289,6 @@ export const CATEGORY_IDS_BY_PROPERTY_TYPE: Record<string, string[]> = {
     'loan_encumbrance',
     'court_records',
     'govt_acquisition',
-    'kyc',
   ],
   land: [
     'registration',
@@ -315,7 +299,6 @@ export const CATEGORY_IDS_BY_PROPERTY_TYPE: Record<string, string[]> = {
     'govt_acquisition',
     'marshy',
     'mountain',
-    'kyc',
   ],
   commercial: [
     'registration',
@@ -325,7 +308,6 @@ export const CATEGORY_IDS_BY_PROPERTY_TYPE: Record<string, string[]> = {
     'loan_encumbrance',
     'court_records',
     'environmental',
-    'kyc',
   ],
 }
 

@@ -1102,7 +1102,7 @@ export function SiteVisitsStage({ deal, onStageChange }: SiteVisitsStageProps) {
             </div>
           ) : (
             visit &&
-            visit.status !== 'cancelled' && (
+            (visit.status === 'scheduled' || visit.status === 'confirmed') && (
               <Button
                 type="button"
                 variant="outline"

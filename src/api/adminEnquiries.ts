@@ -1,4 +1,8 @@
-import { adminApiRequest, adminApiRequestEnvelope } from './admin'
+import { adminApiRequest, adminApiRequestEnvelope, formatAdminApiError } from './admin'
+import {
+  computeSellCompletenessPercent,
+  normalizeSellPropertyDetails,
+} from '@/utils/propertyFieldConfig'
 
 type ApiMeta = {
   requestId?: string
@@ -438,10 +442,13 @@ export function getCompletenessColor(percent: number) {
 export function getMissingItems(request: SellRequest) {
   const missing: string[] = []
   if (!request.photosCount) missing.push('photos')
-  if (!request.documentsCount) missing.push('documents')
+  const uploadedDocs = request.documents.filter(
+    (doc) => doc.status === 'uploaded',
+  ).length
+  if (!request.documentsCount && uploadedDocs === 0) missing.push('documents')
   if (!request.description?.trim()) missing.push('description')
   if (!request.askingPrice || parseSellAskingPrice(request.askingPrice) <= 0) missing.push('asking price')
-  if (!request.location?.trim()) missing.push('location')
+  if (!request.location?.trim() || request.location === 'Location not available') missing.push('location')
   return missing
 }
 
@@ -459,6 +466,22 @@ export function getSimilarProperties(_request: SellRequest): SimilarProperty[] {
   return []
 }
 
+function deriveSellPhotos(raw: RawEntity): string[] {
+  const fromPhotos = Array.isArray(raw.photos)
+    ? raw.photos.map(String).filter(Boolean)
+    : []
+  if (fromPhotos.length) return fromPhotos
+  return (Array.isArray(raw.documents) ? raw.documents : [])
+    .map((doc) => doc as RawEntity)
+    .filter(
+      (doc) =>
+        doc.fileUrl &&
+        !['rejected', 'missing'].includes(stringOf(doc.status)),
+    )
+    .map((doc) => stringOf(doc.fileUrl))
+    .filter(Boolean)
+}
+
 function mapSellRequest(raw: RawEntity): SellRequest {
   const seller = (raw.sellerSnapshot ?? {}) as RawEntity
   const address = (raw.address ?? {}) as RawEntity
@@ -469,6 +492,60 @@ function mapSellRequest(raw: RawEntity): SellRequest {
   const city = stringOf(address.city)
   const state = stringOf(address.state)
   const location = [locality, city].filter(Boolean).join(', ') || 'Location not available'
+  const photos = deriveSellPhotos(raw)
+  const photosCount = Math.max(
+    numberOf(raw.photosCount, 0),
+    photos.length,
+  )
+  const documents = Array.isArray(raw.documents)
+    ? raw.documents.map((doc) => {
+        const item = doc as RawEntity
+        return {
+          name: stringOf(item.name, 'Document'),
+          status: stringOf(item.status, 'uploaded') as DocumentStatus,
+        }
+      })
+    : []
+  const uploadedDocs = documents.filter((doc) => doc.status === 'uploaded').length
+  const documentsCount = Math.max(
+    numberOf(raw.documentsCount, 0),
+    documents.length,
+    uploadedDocs,
+  )
+  const propertyDetails = normalizeSellPropertyDetails(specs, {
+    ownershipType: raw.ownershipType,
+    possessionStatus: raw.possessionStatus,
+    loanOnProperty: raw.loanOnProperty,
+  })
+  const completenessPercent = computeSellCompletenessPercent({
+    propertyType: stringOf(raw.propertyType, 'property'),
+    specifications: specs,
+    ownershipType: stringOf(raw.ownershipType),
+    possessionStatus: stringOf(raw.possessionStatus),
+    loanOnProperty: raw.loanOnProperty as boolean | undefined,
+    askingPrice: numberOf(raw.askingPrice, 0),
+    description: stringOf(raw.description),
+    photos,
+    photosCount,
+    documents: Array.isArray(raw.documents)
+      ? raw.documents.map((doc) => {
+          const item = doc as RawEntity
+          return {
+            status: stringOf(item.status),
+            fileUrl: stringOf(item.fileUrl) || undefined,
+          }
+        })
+      : [],
+    documentsCount,
+    amenities: Array.isArray(raw.amenities) ? raw.amenities.map(String) : [],
+    address: {
+      city,
+      locality,
+      pincode: stringOf(address.pincode),
+      street: stringOf(address.street),
+    },
+    location,
+  })
 
   return {
     id: idOf(raw),
@@ -497,26 +574,18 @@ function mapSellRequest(raw: RawEntity): SellRequest {
     ownershipType: stringOf(raw.ownershipType),
     possessionStatus: stringOf(raw.possessionStatus),
     loanOnProperty: Boolean(raw.loanOnProperty),
-    photos: Array.isArray(raw.photos) ? raw.photos.map(String) : [],
-    photosCount: numberOf(raw.photosCount, Array.isArray(raw.photos) ? raw.photos.length : 0),
-    documentsCount: numberOf(raw.documentsCount, Array.isArray(raw.documents) ? raw.documents.length : 0),
-    completenessPercent: numberOf(raw.completenessPercent),
+    photos,
+    photosCount,
+    documentsCount,
+    completenessPercent,
     description: stringOf(raw.description),
     amenities: Array.isArray(raw.amenities) ? raw.amenities.map(String) : [],
     specifications: Object.fromEntries(
       Object.entries(specs).map(([key, value]) => [key === 'reraNumber' ? 'rera' : key, String(value ?? '')]),
     ) as SellSpecifications,
-    propertyDetails: raw.propertyDetails as Record<string, unknown> | undefined,
+    propertyDetails: Object.keys(propertyDetails).length > 0 ? propertyDetails : undefined,
     address: [stringOf(address.street), locality, city, state, stringOf(address.pincode)].filter(Boolean).join(', '),
-    documents: Array.isArray(raw.documents)
-      ? raw.documents.map((doc) => {
-          const item = doc as RawEntity
-          return {
-            name: stringOf(item.name, 'Document'),
-            status: stringOf(item.status, 'uploaded') as DocumentStatus,
-          }
-        })
-      : [],
+    documents,
     status: stringOf(raw.status, 'new') as SellRequestStatus,
     submittedAt: isoOf(raw.submittedAt ?? raw.createdAt),
     referenceId: stringOf(raw.referenceId, idOf(raw)),
@@ -553,6 +622,21 @@ export async function getAdminSellRequest(accessToken: string, sellRequestId: st
   return mapSellRequest(data ?? {})
 }
 
+export async function updateAdminSellRequest(
+  accessToken: string,
+  sellRequestId: string,
+  body: { assignedTo?: string | null },
+) {
+  const payload = { ...body }
+  if (payload.assignedTo === null) delete payload.assignedTo
+  const data = await adminApiRequest<RawEntity>(`/admin/sell-requests/${sellRequestId}`, {
+    accessToken,
+    method: 'PATCH',
+    body: payload as Record<string, unknown>,
+  })
+  return mapSellRequest(data ?? {})
+}
+
 export async function reviewAdminSellRequest(
   accessToken: string,
   sellRequestId: string,
@@ -568,6 +652,64 @@ export async function reviewAdminSellRequest(
 }
 
 export type VisitStatus = 'scheduled' | 'confirmed' | 'completed' | 'cancelled' | 'missed' | 'rescheduled'
+
+/** Mirrors Backend-V1/src/shared/workflows.js visitStatus */
+export const VISIT_STATUS_TRANSITIONS: Record<VisitStatus, VisitStatus[]> = {
+  scheduled: ['confirmed', 'rescheduled', 'cancelled', 'missed', 'completed'],
+  confirmed: ['completed', 'rescheduled', 'cancelled', 'missed'],
+  rescheduled: ['confirmed', 'completed', 'cancelled', 'missed'],
+  completed: [],
+  cancelled: [],
+  missed: [],
+}
+
+export const VISIT_STATUS_LABELS: Record<VisitStatus, string> = {
+  scheduled: 'Scheduled',
+  confirmed: 'Confirmed',
+  completed: 'Completed',
+  cancelled: 'Cancelled',
+  missed: 'Missed',
+  rescheduled: 'Rescheduled',
+}
+
+export function canTransitionVisitStatus(from: VisitStatus, to: VisitStatus): boolean {
+  return VISIT_STATUS_TRANSITIONS[from]?.includes(to) ?? false
+}
+
+export function canCancelVisit(status: VisitStatus): boolean {
+  return canTransitionVisitStatus(status, 'cancelled')
+}
+
+export function canRescheduleVisit(status: VisitStatus): boolean {
+  return canTransitionVisitStatus(status, 'rescheduled')
+}
+
+export function formatVisitTransitionError(from: VisitStatus, to: VisitStatus): string {
+  const fromLabel = VISIT_STATUS_LABELS[from] ?? from
+  const actionByTarget: Partial<Record<VisitStatus, string>> = {
+    cancelled: 'cancelled',
+    rescheduled: 'rescheduled',
+    completed: 'marked as completed',
+    missed: 'marked as missed',
+    confirmed: 'confirmed',
+  }
+  const action = actionByTarget[to] ?? `updated to ${VISIT_STATUS_LABELS[to] ?? to}`
+  return `This visit cannot be ${action} because it is already ${fromLabel.toLowerCase()}.`
+}
+
+export function formatVisitApiError(
+  error: unknown,
+  from: VisitStatus,
+  to: VisitStatus,
+  fallback: string,
+): string {
+  const message = formatAdminApiError(error, fallback)
+  if (/invalid state transition/i.test(message)) {
+    return formatVisitTransitionError(from, to)
+  }
+  return message
+}
+
 export type VisitType = 'physical' | 'virtual'
 export type VirtualPlatform = 'zoom' | 'google_meet' | 'teams' | 'whatsapp_video' | null
 export type BuyerInterest = 'very_interested' | 'interested' | 'not_interested' | 'needs_time'

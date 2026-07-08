@@ -162,6 +162,27 @@ export async function deleteWorkflowLog(accessToken: string, logId: string) {
   })
 }
 
+export async function sendWorkflowEmail(
+  accessToken: string,
+  type: string,
+  id: string,
+  body: {
+    to: string
+    subject: string
+    body: string
+    summary?: string
+    from?: string
+  },
+) {
+  return mapWorkflowLog(
+    await adminApiRequest<RawEntity>(withWorkflowPath(type, id, 'email'), {
+      method: 'POST',
+      accessToken,
+      body,
+    }),
+  )
+}
+
 export async function sendWorkflowPush(
   accessToken: string,
   type: string,
@@ -170,6 +191,7 @@ export async function sendWorkflowPush(
     userId?: string | null
     recipient?: string | null
     notificationId: string
+    audience?: 'buyer' | 'seller'
     template: { title: string; body: string; deepLink?: string }
     dedupeKey?: string
     skipDuplicateCheck?: boolean

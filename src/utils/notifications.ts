@@ -1,17 +1,62 @@
 import { readAdminSession } from '@/api/admin'
 import { sendWorkflowPush, type WorkflowEntityType } from '@/api/adminWorkflow'
 
+export type NotificationAudience = 'buyer' | 'seller'
+
 export type NotificationTemplate = {
   title: string
   body: string
   deepLink: string
+  audience?: NotificationAudience
 }
 
+/**
+ * Master Document Part 8 — Notification Map.
+ * Buyer: N-01→P-08, N-02→P-08, N-03→B-12, N-05→B-13, N-06→B-14, N-07→B-15, N-08→B-16
+ * Seller: N-02→P-05, N-04→SL-12, N-05→SL-14, N-06→SL-11, N-07→SL-15, N-08→SL-16
+ */
 export const NOTIFICATION_TEMPLATES = {
-  N02_ENQUIRY_RESPONDED: (_buyerName: string, propertyTitle: string): NotificationTemplate => ({
-    title: 'Enquiry Response Received',
-    body: `Team Builtglory responded to your enquiry for ${propertyTitle}.`,
-    deepLink: 'P-02 My Enquiries',
+  N01_ENQUIRY_SUBMITTED: (_buyerName: string, _propertyTitle?: string): NotificationTemplate => ({
+    title: 'Enquiry Received',
+    body: 'Your enquiry has been received. Our team will contact you within 24 hours.',
+    deepLink: 'P-08',
+    audience: 'buyer',
+  }),
+
+  N02_ENQUIRY_RESPONDED: (_buyerName: string, _propertyTitle?: string): NotificationTemplate => ({
+    title: 'Executive Call',
+    body: 'A Builtglory executive will call you shortly.',
+    deepLink: 'P-08',
+    audience: 'buyer',
+  }),
+
+  N02_SELLER_STATUS: (_sellerName: string, propertyTitle: string): NotificationTemplate => ({
+    title: 'Listing Update',
+    body: `A Builtglory executive will call you shortly about "${propertyTitle}".`,
+    deepLink: 'P-05',
+    audience: 'seller',
+  }),
+
+  N02_LISTING_APPROVED: (_sellerName: string, propertyTitle: string): NotificationTemplate => ({
+    title: 'Listing Approved! 🎉',
+    body: `Your listing "${propertyTitle}" is now live on Builtglory!`,
+    deepLink: 'P-05',
+    audience: 'seller',
+  }),
+
+  N03_VISIT_SCHEDULED: (
+    _buyerName: string,
+    propertyTitle: string,
+    date?: string,
+    time?: string,
+  ): NotificationTemplate => ({
+    title: 'Visit Scheduled',
+    body:
+      date && time
+        ? `Your visit for ${propertyTitle} is scheduled for ${date} at ${time}. Tap to view details.`
+        : `Your visit has been scheduled. Tap to view details.`,
+    deepLink: 'B-12',
+    audience: 'buyer',
   }),
 
   N03_VISIT_CONFIRMED: (
@@ -21,34 +66,111 @@ export const NOTIFICATION_TEMPLATES = {
     time: string,
   ): NotificationTemplate => ({
     title: 'Visit Confirmed! 📅',
-    body: `Your visit for ${propertyTitle} is confirmed for ${date} at ${time}.`,
-    deepLink: 'B-13 Visit Confirmation',
+    body: `Your visit for ${propertyTitle} is confirmed for ${date} at ${time}. Tap to view details.`,
+    deepLink: 'B-12',
+    audience: 'buyer',
   }),
 
-  N04_VISIT_REMINDER: (
+  N03_VISIT_REMINDER: (
     _buyerName: string,
     propertyTitle: string,
     time: string,
   ): NotificationTemplate => ({
     title: 'Visit Reminder 🔔',
     body: `Reminder: Your visit for ${propertyTitle} is tomorrow at ${time}. See you there!`,
-    deepLink: 'B-13 Visit Confirmation',
+    deepLink: 'B-12',
+    audience: 'buyer',
   }),
 
-  N05_VISIT_CANCELLED: (
+  N03_VISIT_CANCELLED: (
     _buyerName: string,
     propertyTitle: string,
     reason: string,
   ): NotificationTemplate => ({
     title: 'Visit Cancelled',
     body: `Your visit for ${propertyTitle} was cancelled. Reason: ${reason}`,
-    deepLink: 'B-12 Schedule Visit',
+    deepLink: 'B-12',
+    audience: 'buyer',
   }),
 
+  N04_OFFER_SENT: (_sellerName: string, propertyTitle: string): NotificationTemplate => ({
+    title: 'Offer Received',
+    body: `Builtglory has sent you an offer for "${propertyTitle}". Valid for 48 hours. Tap to view.`,
+    deepLink: 'SL-12',
+    audience: 'seller',
+  }),
+
+  N05_DEAL_CONFIRMED_BUYER: (_buyerName: string, propertyTitle?: string): NotificationTemplate => ({
+    title: 'Deal Confirmed',
+    body: propertyTitle
+      ? `Your deal for ${propertyTitle} has been confirmed. Tap to view next steps.`
+      : 'Your deal has been confirmed. Tap to view next steps.',
+    deepLink: 'B-13',
+    audience: 'buyer',
+  }),
+
+  N05_DEAL_CONFIRMED_SELLER: (_sellerName: string, propertyTitle?: string): NotificationTemplate => ({
+    title: 'Deal Confirmed',
+    body: propertyTitle
+      ? `Your deal for ${propertyTitle} has been confirmed. Tap to view next steps.`
+      : 'Your deal has been confirmed. Tap to view next steps.',
+    deepLink: 'SL-14',
+    audience: 'seller',
+  }),
+
+  N06_DOCS_SHARED: (_buyerName: string, propertyTitle?: string): NotificationTemplate => ({
+    title: 'Documents Ready',
+    body: propertyTitle
+      ? `Documents are ready for ${propertyTitle}.`
+      : 'Documents are ready.',
+    deepLink: 'B-14',
+    audience: 'buyer',
+  }),
+
+  N06_REUPLOAD_REQUIRED: (
+    _sellerName: string,
+    propertyTitle: string,
+    reason?: string,
+  ): NotificationTemplate => ({
+    title: 'Re-upload Required',
+    body: reason
+      ? `Action required: re-upload documents for "${propertyTitle}". ${reason}`
+      : `Action required: re-upload documents for "${propertyTitle}".`,
+    deepLink: 'SL-11',
+    audience: 'seller',
+  }),
+
+  N07_PAYMENT_BUYER: (_buyerName: string, propertyTitle?: string): NotificationTemplate => ({
+    title: 'Payment Update',
+    body: propertyTitle
+      ? `Complete your token payment for ${propertyTitle}.`
+      : 'Complete your token payment.',
+    deepLink: 'B-15',
+    audience: 'buyer',
+  }),
+
+  N07_PAYMENT_SELLER: (_sellerName: string, propertyTitle?: string): NotificationTemplate => ({
+    title: 'Payment Schedule',
+    body: propertyTitle
+      ? `View your payment schedule for "${propertyTitle}".`
+      : 'View your payment schedule.',
+    deepLink: 'SL-15',
+    audience: 'seller',
+  }),
+
+  N08_REGISTRATION: (_name: string, audience: NotificationAudience = 'buyer'): NotificationTemplate => ({
+    title: 'Registration Confirmed',
+    body: 'Your registration appointment is confirmed. Tap to view details.',
+    deepLink: audience === 'seller' ? 'SL-16' : 'B-16',
+    audience,
+  }),
+
+  // Legacy aliases used by existing detail pages
   N06_LISTING_APPROVED: (_sellerName: string, propertyTitle: string): NotificationTemplate => ({
     title: 'Listing Approved! 🎉',
     body: `Your listing "${propertyTitle}" is now live on Builtglory!`,
-    deepLink: 'SL-09 Seller Dashboard',
+    deepLink: 'P-05',
+    audience: 'seller',
   }),
 
   N07_LISTING_REJECTED: (
@@ -58,8 +180,23 @@ export const NOTIFICATION_TEMPLATES = {
   ): NotificationTemplate => ({
     title: 'Listing Needs Changes',
     body: `Your listing "${propertyTitle}" needs changes: ${reason}`,
-    deepLink: 'SL-07 Review Listing',
+    deepLink: 'SL-11',
+    audience: 'seller',
   }),
+
+  N04_VISIT_REMINDER: (
+    buyerName: string,
+    propertyTitle: string,
+    time: string,
+  ): NotificationTemplate =>
+    NOTIFICATION_TEMPLATES.N03_VISIT_REMINDER(buyerName, propertyTitle, time),
+
+  N05_VISIT_CANCELLED: (
+    buyerName: string,
+    propertyTitle: string,
+    reason: string,
+  ): NotificationTemplate =>
+    NOTIFICATION_TEMPLATES.N03_VISIT_CANCELLED(buyerName, propertyTitle, reason),
 
   N09_INTERIOR_QUOTE: (_buyerName: string, propertyTitle: string): NotificationTemplate => ({
     title: 'Interior Quote Ready! 🛋️',
@@ -70,13 +207,15 @@ export const NOTIFICATION_TEMPLATES = {
   N10_STAGE_PAYMENT_PLAN: (_buyerName: string, propertyTitle: string): NotificationTemplate => ({
     title: 'Payment Plan Ready! 💳',
     body: `Your stage payment plan for ${propertyTitle} is ready. Valid for 72 hours.`,
-    deepLink: 'B-13C Plan Confirmed',
+    deepLink: 'B-15',
+    audience: 'buyer',
   }),
 
   N11_MILESTONE_VERIFIED: (_buyerName: string, stageName: string): NotificationTemplate => ({
     title: 'Milestone Verified! ✅',
     body: `${stageName} has been verified. Next payment stage is now active.`,
-    deepLink: 'B-13D Tracking Dashboard',
+    deepLink: 'B-15',
+    audience: 'buyer',
   }),
 
   N12_MILESTONE_REJECTED: (
@@ -86,19 +225,8 @@ export const NOTIFICATION_TEMPLATES = {
   ): NotificationTemplate => ({
     title: 'Proof Needs Resubmission',
     body: `${stageName} proof rejected: ${reason}. Please reupload.`,
-    deepLink: 'B-13E Milestone Inspection',
-  }),
-
-  N13_KYC_VERIFIED: (_userName: string): NotificationTemplate => ({
-    title: 'KYC Verified! 🎉',
-    body: 'Your KYC documents have been verified. You can now access all features.',
-    deepLink: 'P-06 KYC Documents',
-  }),
-
-  N14_KYC_REJECTED: (_userName: string, reason: string): NotificationTemplate => ({
-    title: 'KYC Document Issue',
-    body: `KYC rejected: ${reason}. Please reupload your documents.`,
-    deepLink: 'P-06 KYC Documents',
+    deepLink: 'B-15',
+    audience: 'buyer',
   }),
 
   N15_UPCOMING_LAUNCH: (propertyTitle: string): NotificationTemplate => ({
@@ -130,7 +258,8 @@ export const NOTIFICATION_TEMPLATES = {
   ): NotificationTemplate => ({
     title: 'Document Required 📄',
     body: `Please upload "${documentName}" for ${propertyTitle} on the app.`,
-    deepLink: 'My Documents — Upload',
+    deepLink: 'B-14',
+    audience: 'buyer',
   }),
 }
 
@@ -152,6 +281,7 @@ export type SendPushOptions = {
   skipDuplicateCheck?: boolean
   dedupeKey?: string
   userId?: string | null
+  audience?: NotificationAudience
   relatedTo?: {
     type: WorkflowEntityType
     id: string
@@ -180,7 +310,12 @@ export function sendPushNotification(
     userId: options.userId,
     recipient: userName,
     notificationId,
-    template,
+    audience: options.audience || template.audience,
+    template: {
+      title: template.title,
+      body: template.body,
+      deepLink: template.deepLink,
+    },
     dedupeKey,
     skipDuplicateCheck: true,
   }).catch(() => undefined)

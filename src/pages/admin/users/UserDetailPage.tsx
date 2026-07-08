@@ -9,32 +9,22 @@ import {
 import { Link, useNavigate, useParams } from 'react-router'
 import {
   ChevronLeft,
-  Clock,
-  FileText,
-  Minus,
   MoreVertical,
-  ShieldCheck,
   User,
   X,
-  XCircle,
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { readAdminSession } from '@/api/admin'
+import { formatAdminApiError, readAdminSession } from '@/api/admin'
 import {
   exportAdminUserData,
   getAdminUser,
-  getKycStatusColor,
-  getKycStatusLabel,
   getRoleLabel,
   getUserTypeBadgeColor,
   updateAdminUserBlock,
   updateAdminUserFema,
-  updateAdminUserKyc,
   updateAdminUserProfile,
-  type KycDocument,
-  type KycDocumentStatus,
   type FemaCompliance,
   type FemaComplianceStatus,
   type User as AppUser,
@@ -58,10 +48,16 @@ import {
   listAdminSalesDeals,
   type SalesDeal,
 } from '@/api/adminSales'
-import { createWorkflowLog, deleteWorkflowLog, listWorkflowLogs, type WorkflowLog } from '@/api/adminWorkflow'
+import {
+  createWorkflowLog,
+  deleteWorkflowLog,
+  listWorkflowLogs,
+  sendWorkflowEmail,
+  type WorkflowLog,
+} from '@/api/adminWorkflow'
 import { SentMessagesCard } from '@/components/admin/SentMessagesCard'
-import NotificationPreview from '@/components/NotificationPreview'
 import { bindToast, copyText, handleCall } from '@/utils/adminActions'
+import { hasPermission } from '@/config/adminPermissions'
 import { cn } from '@/lib/utils'
 import {
   claimConcurrentEditing,
@@ -73,20 +69,9 @@ import {
   loadMessages,
   logMessage,
   messageToActivityText,
-  openEmail,
   openWhatsApp,
   type SentMessage,
 } from '@/utils/messageLog'
-import { NOTIFICATION_TEMPLATES, sendPushNotification } from '@/utils/notifications'
-
-/** Extends backend KYC documents with an optional preview URL for the admin viewer. */
-type KycDocumentWithPreview = KycDocument & {
-  previewUrl?: string | null
-}
-
-type DetailUser = Omit<AppUser, 'kycDocuments'> & {
-  kycDocuments: KycDocumentWithPreview[]
-}
 
 interface AdminNote {
   id: string
@@ -159,15 +144,6 @@ const COUNTRY_FLAGS: Record<string, string> = {
   Singapore: '🇸🇬',
 }
 
-const REJECT_REASONS = [
-  'Document not clear',
-  'Document expired',
-  'Name mismatch with profile',
-  'Wrong document type uploaded',
-  'Document partially visible',
-  'Other (specify below)',
-]
-
 const BLOCK_REASONS = [
   'Spam activity',
   'Fake enquiries',
@@ -176,8 +152,15 @@ const BLOCK_REASONS = [
   'Other',
 ]
 
-const KYC_REMINDER_TEMPLATE = (name: string) =>
-  `Hi ${name}, please complete your KYC verification on the Builtglory app to unlock all features.`
+const WHATSAPP_GREETING = (name: string) =>
+  `Hi ${name}, this is BuiltGlory admin.`
+
+const ADMIN_SENDER_EMAIL = 'admin@builtglory.com'
+
+const DEFAULT_EMAIL_SUBJECT = (name: string) => `BuiltGlory — ${name}`
+
+const DEFAULT_EMAIL_BODY = (name: string) =>
+  `Hi ${name},\n\nThis is the BuiltGlory team. We wanted to reach out regarding your account.\n\nPlease let us know if you have any questions.\n\nBest regards,\nBuiltGlory Admin Team`
 
 function getInitials(name: string) {
   return name
@@ -206,7 +189,7 @@ function FemaComplianceCard({
   onUpdate,
   toastApi,
 }: {
-  user: DetailUser
+  user: AppUser
   onUpdate: (fema: FemaCompliance) => void | Promise<void>
   toastApi: ReturnType<typeof bindToast>
 }) {
@@ -319,7 +302,7 @@ function FemaComplianceCard({
   )
 }
 
-function ProfilePhotoSection({ user }: { user: DetailUser }) {
+function ProfilePhotoSection({ user }: { user: AppUser }) {
   return (
     <div className="flex flex-col items-center border-b border-border pb-4">
       {user.profilePhoto ? (
@@ -382,19 +365,8 @@ function roleTabPath(role: UserRole) {
   return '/admin/users/all'
 }
 
-function cloneUser(u: AppUser): DetailUser {
-  const raw = JSON.parse(JSON.stringify(u)) as AppUser
-  return {
-    ...raw,
-    kycDocuments: raw.kycDocuments.map((doc) => enrichDocumentPreview(doc)),
-  }
-}
-
-function enrichDocumentPreview(doc: KycDocument): KycDocumentWithPreview {
-  return {
-    ...doc,
-    previewUrl: doc.fileUrl ?? (doc as KycDocumentWithPreview).previewUrl ?? null,
-  }
+function cloneUser(u: AppUser): AppUser {
+  return JSON.parse(JSON.stringify(u)) as AppUser
 }
 
 function mapHistoryEnquiry(enquiry: BuyEnquiry): HistoryEnquiry {
@@ -448,7 +420,7 @@ function mapHistoryListing(request: SellRequest): HistoryListing {
   }
 }
 
-function buildTimeline(user: DetailUser, enquiries: HistoryEnquiry[], visits: HistoryVisit[]) {
+function buildTimeline(user: AppUser, enquiries: HistoryEnquiry[], visits: HistoryVisit[]) {
   const items: { id: string; at: string; text: string }[] = [
     {
       id: 'reg',
@@ -456,20 +428,6 @@ function buildTimeline(user: DetailUser, enquiries: HistoryEnquiry[], visits: Hi
       text: 'Account created — registered on app',
     },
   ]
-  if (user.kycSubmittedAt) {
-    items.push({
-      id: 'kyc-sub',
-      at: user.kycSubmittedAt,
-      text: 'Submitted KYC documents',
-    })
-  }
-  if (user.kycVerifiedAt) {
-    items.push({
-      id: 'kyc-ver',
-      at: user.kycVerifiedAt,
-      text: 'KYC verified by admin',
-    })
-  }
   enquiries.forEach((e) => {
     items.push({
       id: `enq-${e.id}`,
@@ -519,158 +477,12 @@ function DetailSkeleton() {
   )
 }
 
-function kycStatusLabel(status: KycDocumentStatus): string {
-  if (status === 'verified') return 'Uploaded & Verified ✅'
-  if (status === 'uploaded') return 'Uploaded, Pending Verify'
-  if (status === 'rejected') return 'Rejected'
-  if (status === 'expired') return 'Expired'
-  return 'Missing'
-}
-
-function DocumentPreviewModal({
-  doc,
-  onClose,
-  onToast,
-  onVerify,
-}: {
-  doc: KycDocumentWithPreview
-  onClose: () => void
-  onToast: (msg: string) => void
-  onVerify?: () => void
-}) {
-  const hasUrl = Boolean(doc.previewUrl)
-  const uploadedLabel = doc.uploadedAt
-    ? new Date(doc.uploadedAt).toLocaleDateString('en-IN', { dateStyle: 'medium' })
-    : new Date().toLocaleDateString('en-IN', { dateStyle: 'medium' })
-
-  return (
-    <div
-      className="fixed inset-0 z-[60] bg-black/70"
-      onClick={onClose}
-      role="dialog"
-      aria-modal="true"
-    >
-      <div
-        className="mx-auto mt-20 max-w-[600px] rounded-xl bg-card p-6 shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="relative mb-4">
-          <div className="pr-10">
-            <p className="text-lg font-semibold text-foreground">{doc.name}</p>
-            <div className="mt-1">
-              <DocStatusBadge status={doc.status} />
-            </div>
-          </div>
-          <button
-            type="button"
-            className="absolute right-0 top-0 rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-            onClick={onClose}
-            aria-label="Close preview"
-          >
-            <X className="size-5" />
-          </button>
-        </div>
-
-        <div className="mb-6">
-          {hasUrl ? (
-            <img
-              src={doc.previewUrl!}
-              alt={doc.name}
-              className="max-h-[400px] w-full rounded-lg object-contain bg-muted"
-            />
-          ) : (
-            <>
-              <div className="flex flex-col items-center justify-center rounded-lg bg-muted py-12">
-                <FileText className="size-16 text-muted-foreground" strokeWidth={1.25} />
-                <p className="mt-3 font-medium text-foreground">Document Preview</p>
-              </div>
-              <div className="mt-4 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-200">
-                📄 In production, the actual document uploaded by the buyer/seller appears here.
-                Files are stored in cloud storage (S3/Cloudinary) and displayed via secure URL.
-              </div>
-              <div className="mt-4 space-y-1 text-sm text-muted-foreground">
-                <p>Document: {doc.name}</p>
-                <p>Status: {kycStatusLabel(doc.status)}</p>
-                <p>Uploaded: {uploadedLabel}</p>
-              </div>
-            </>
-          )}
-        </div>
-
-        <div className="flex flex-wrap items-center justify-end gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => {
-              if (doc.previewUrl) {
-                window.open(doc.previewUrl, '_blank', 'noopener,noreferrer')
-              } else {
-                onToast('Download available when backend is connected')
-              }
-            }}
-          >
-            📥 Download
-          </Button>
-          {doc.status === 'verified' ? (
-            <span className="inline-flex items-center rounded-full bg-green-100 px-3 py-1 text-sm text-green-700">
-              ✅ Verified
-            </span>
-          ) : doc.status === 'uploaded' && onVerify ? (
-            <Button type="button" variant="outline" onClick={onVerify}>
-              Verify
-            </Button>
-          ) : null}
-          <Button type="button" onClick={onClose}>
-            Close
-          </Button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function DocStatusBadge({ status }: { status: KycDocumentStatus }) {
-  if (status === 'verified') {
-    return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-green-100 px-2 py-0.5 text-xs text-green-700">
-        <ShieldCheck className="size-3" /> Verified ✅
-      </span>
-    )
-  }
-  if (status === 'uploaded') {
-    return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-orange-100 px-2 py-0.5 text-xs text-orange-700">
-        <Clock className="size-3" /> Pending ⏳
-      </span>
-    )
-  }
-  if (status === 'rejected') {
-    return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-red-100 px-2 py-0.5 text-xs text-red-700">
-        <XCircle className="size-3" /> Rejected ❌
-      </span>
-    )
-  }
-  if (status === 'expired') {
-    return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-red-100 px-2 py-0.5 text-xs text-red-700">
-        Expired
-      </span>
-    )
-  }
-  return (
-    <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-      <Minus className="size-3" /> Missing —
-    </span>
-  )
-}
-
 export function UserDetailPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
 
   const [loading, setLoading] = useState(true)
-  const [user, setUser] = useState<DetailUser | null>(null)
+  const [user, setUser] = useState<AppUser | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [actionSaving, setActionSaving] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
@@ -691,22 +503,16 @@ export function UserDetailPage() {
   const [emailOpen, setEmailOpen] = useState(false)
   const [emailSubject, setEmailSubject] = useState('')
   const [emailBody, setEmailBody] = useState('')
+  const [emailSending, setEmailSending] = useState(false)
   const [sentMessages, setSentMessages] = useState<SentMessage[]>([])
   const [pushOpen, setPushOpen] = useState(false)
   const [pushTitle, setPushTitle] = useState('')
   const [pushMessage, setPushMessage] = useState('')
 
-  const [rejectDocIndex, setRejectDocIndex] = useState<number | null>(null)
-  const [rejectReason, setRejectReason] = useState(REJECT_REASONS[0])
-  const [rejectNotes, setRejectNotes] = useState('')
-  const [kycPushBanner, setKycPushBanner] = useState<string | null>(null)
-  const [verifyPreviewDocIndex, setVerifyPreviewDocIndex] = useState<number | null>(null)
-
   const [blockOpen, setBlockOpen] = useState(false)
   const [blockReason, setBlockReason] = useState(BLOCK_REASONS[0])
   const [blockNotes, setBlockNotes] = useState('')
-  const [blockDealsConfirm, setBlockDealsConfirm] = useState<DetailUser | null>(null)
-  const [previewDoc, setPreviewDoc] = useState<KycDocumentWithPreview | null>(null)
+  const [blockDealsConfirm, setBlockDealsConfirm] = useState<AppUser | null>(null)
   const [profileEditOpen, setProfileEditOpen] = useState(false)
   const [editingWarning, setEditingWarning] = useState<string | null>(null)
   const [editingDismissed, setEditingDismissed] = useState(false)
@@ -747,6 +553,10 @@ export function UserDetailPage() {
 
   const showToast = useCallback((msg: string) => setToast(msg), [])
 
+  const canEditUser = hasPermission(readAdminSession(), 'users.write')
+  const canReviewUser = hasPermission(readAdminSession(), 'users.kyc.review')
+  const canReviewFema = hasPermission(readAdminSession(), 'users.fema.review')
+
   const loadUser = useCallback(async () => {
     if (!id) {
       setUser(null)
@@ -774,7 +584,7 @@ export function UserDetailPage() {
       setUser(detailUser)
       setNotes(noteResult.data.map(workflowLogToAdminNote))
       setAssignDraft(detailUser.assignedTo ?? '')
-      setWhatsappBody(KYC_REMINDER_TEMPLATE(detailUser.name))
+      setWhatsappBody(WHATSAPP_GREETING(detailUser.name))
       setSalesTeam(team)
 
       const [enquiryResult, visitResult, sellResult, salesResult] = await Promise.all([
@@ -813,7 +623,7 @@ export function UserDetailPage() {
     const detailUser = cloneUser(updated)
     setUser(detailUser)
     setAssignDraft(detailUser.assignedTo ?? '')
-    setWhatsappBody(KYC_REMINDER_TEMPLATE(detailUser.name))
+    setWhatsappBody(WHATSAPP_GREETING(detailUser.name))
   }, [])
 
   const withSession = useCallback(
@@ -835,123 +645,6 @@ export function UserDetailPage() {
       }
     },
     [showToast],
-  )
-
-  const showNameMismatch = user?.id === 'usr_006'
-
-  const sendKycPush = useCallback(
-    (template: ReturnType<typeof NOTIFICATION_TEMPLATES.N13_KYC_VERIFIED>, notificationId: string) => {
-      if (!user) return
-      let msg = sendPushNotification(user.name, template, notificationId, {
-        dedupeKey: `${notificationId}:${user.id}`,
-        userId: user.id,
-        relatedTo: { type: 'user', id: user.id },
-      })
-      if (msg.includes('recently') && window.confirm(`${msg}\n\nSend again?`)) {
-        msg = sendPushNotification(user.name, template, notificationId, {
-          skipDuplicateCheck: true,
-          dedupeKey: `${notificationId}:${user.id}`,
-          userId: user.id,
-          relatedTo: { type: 'user', id: user.id },
-        })
-      }
-      showToast(msg)
-    },
-    [user, showToast],
-  )
-
-  const handleVerifyDocument = useCallback(
-    async (index: number) => {
-      if (!user) return
-      const doc = user.kycDocuments[index]
-      if (!doc.id) {
-        showToast('This KYC document is missing a backend document id.')
-        return
-      }
-      if (verifyPreviewDocIndex !== index) {
-        setVerifyPreviewDocIndex(index)
-        return
-      }
-      if (showNameMismatch) {
-        if (
-          !window.confirm(
-            'Name mismatch detected. Verify carefully before approving.',
-          )
-        ) {
-          return
-        }
-      }
-      if (
-        !window.confirm(
-          `Are you sure you want to verify ${doc.name}? Cannot be undone easily.`,
-        )
-      ) {
-        return
-      }
-      setVerifyPreviewDocIndex(null)
-      const docs = [...user.kycDocuments]
-      docs[index] = {
-        ...docs[index],
-        status: 'verified',
-        verifiedAt: new Date().toISOString(),
-        rejectionReason: null,
-      }
-      const allUploadedVerified = docs
-        .filter((d) => d.status !== 'missing')
-        .every((d) => d.status === 'verified')
-      const updated = await withSession((accessToken) =>
-        updateAdminUserKyc(accessToken, user.id, {
-          status: allUploadedVerified ? 'verified' : undefined,
-          documentUpdates: [{ documentId: doc.id, status: 'verified', rejectionReason: null }],
-          notes: `${doc.name} verified from admin user detail.`,
-        }),
-      )
-      if (!updated) return
-      replaceUser(updated)
-      if (allUploadedVerified) {
-        showToast('✅ KYC Complete!')
-      } else {
-        showToast(`${doc.name} verified`)
-        sendKycPush(NOTIFICATION_TEMPLATES.N13_KYC_VERIFIED(user.name), 'N-13')
-        setKycPushBanner('N-13')
-      }
-    },
-    [user, showNameMismatch, verifyPreviewDocIndex, showToast, withSession, replaceUser, sendKycPush],
-  )
-
-  const handleRejectDocument = useCallback(
-    async (index: number) => {
-      if (!user) return
-      const doc = user.kycDocuments[index]
-      if (!doc.id) {
-        showToast('This KYC document is missing a backend document id.')
-        return
-      }
-      const needsDetails = rejectReason === 'Other (specify below)'
-      if (needsDetails && !rejectNotes.trim()) {
-        showToast('Details required when reason is Other')
-        return
-      }
-      const reason = needsDetails
-        ? rejectNotes.trim()
-        : rejectNotes.trim()
-          ? `${rejectReason}: ${rejectNotes.trim()}`
-          : rejectReason
-      const updated = await withSession((accessToken) =>
-        updateAdminUserKyc(accessToken, user.id, {
-          status: 'rejected',
-          documentUpdates: [{ documentId: doc.id, status: 'rejected', rejectionReason: reason }],
-          notes: reason,
-        }),
-      )
-      if (!updated) return
-      replaceUser(updated)
-      sendKycPush(NOTIFICATION_TEMPLATES.N14_KYC_REJECTED(user.name, reason), 'N-14')
-      setRejectDocIndex(null)
-      setRejectNotes('')
-      showToast(`${doc.name} rejected — notification N-14 sent`)
-    },
-    [user, rejectReason, rejectNotes, showToast, withSession, replaceUser, sendKycPush],
   )
 
   const refreshSentMessages = useCallback(() => {
@@ -989,27 +682,6 @@ export function UserDetailPage() {
     },
     [user, refreshSentMessages],
   )
-
-  const overallKycMessage = useMemo(() => {
-    if (!user) return null
-    if (user.kycDocuments.length === 0) {
-      return { type: 'none' as const, text: '📋 KYC not started' }
-    }
-    if (user.kycDocuments.some((d) => d.status === 'rejected')) {
-      return { type: 'rejected' as const, text: '❌ Action required — documents rejected' }
-    }
-    if (user.kycDocuments.some((d) => d.status === 'uploaded')) {
-      return { type: 'pending' as const, text: '⏳ Verification in progress' }
-    }
-    if (user.kycDocuments.every((d) => d.status === 'verified')) {
-      return {
-        type: 'complete' as const,
-        text: '✅ KYC Complete',
-        date: user.kycVerifiedAt,
-      }
-    }
-    return { type: 'pending' as const, text: '⏳ Verification in progress' }
-  }, [user])
 
   const assigneeOptions = useMemo(
     () => salesTeam.map((member) => ({ id: member.id, label: member.name })),
@@ -1049,7 +721,7 @@ export function UserDetailPage() {
   }
 
   const handleBlockClick = () => {
-    if (!user) return
+    if (!user || !canReviewUser) return
     if (user.isBlocked) {
       void saveBlockState(false)
       return
@@ -1062,7 +734,7 @@ export function UserDetailPage() {
   }
 
   const openProfileEdit = useCallback(() => {
-    if (!user) return
+    if (!user || !canEditUser) return
     setProfileForm({
       name: user.name,
       email: user.email ?? '',
@@ -1073,10 +745,10 @@ export function UserDetailPage() {
       assignedTo: user.assignedTo ?? '',
     })
     setProfileEditOpen(true)
-  }, [user])
+  }, [canEditUser, user])
 
   const saveProfileEdit = useCallback(async () => {
-    if (!user) return
+    if (!user || !canEditUser) return
     if (!profileForm.name.trim()) {
       showToast('Full name is required.')
       return
@@ -1096,7 +768,55 @@ export function UserDetailPage() {
     replaceUser(updated)
     setProfileEditOpen(false)
     showToast('Profile updated')
-  }, [profileForm, replaceUser, showToast, user, withSession])
+  }, [canEditUser, profileForm, replaceUser, showToast, user, withSession])
+
+  const openEmailComposer = useCallback(() => {
+    if (!user) return
+    if (!user.email) {
+      showToast('No email on file for this user')
+      return
+    }
+    setEmailSubject(DEFAULT_EMAIL_SUBJECT(user.name))
+    setEmailBody(DEFAULT_EMAIL_BODY(user.name))
+    setEmailOpen(true)
+  }, [showToast, user])
+
+  const sendUserEmail = useCallback(async () => {
+    if (!user?.email) {
+      showToast('No email on file')
+      return
+    }
+    if (!emailSubject.trim() || !emailBody.trim()) {
+      showToast('Subject and body are required.')
+      return
+    }
+
+    const session = readAdminSession()
+    if (!session?.accessToken) {
+      showToast('Admin session expired. Please sign in again.')
+      return
+    }
+
+    setEmailSending(true)
+    try {
+      await sendWorkflowEmail(session.accessToken, 'user', user.id, {
+        to: user.email,
+        from: ADMIN_SENDER_EMAIL,
+        subject: emailSubject.trim(),
+        body: emailBody.trim(),
+        summary: `Email sent to ${user.name}`,
+      })
+      setEmailOpen(false)
+      setEmailSubject('')
+      setEmailBody('')
+      refreshSentMessages()
+      showToast('Email sent successfully')
+    } catch (error) {
+      showToast(formatAdminApiError(error, 'Could not send email'))
+    } finally {
+      setEmailSending(false)
+    }
+  }, [emailBody, emailSubject, refreshSentMessages, showToast, user])
 
   const exportUserData = useCallback(async () => {
     if (!user) return
@@ -1145,7 +865,6 @@ export function UserDetailPage() {
     )
   }
 
-  const kycColor = getKycStatusColor(user.kycStatus)
   const showListings = user.role === 'seller' || user.role === 'both'
 
   return (
@@ -1239,12 +958,6 @@ export function UserDetailPage() {
         </div>
       )}
 
-      {user.kycStatus === 'rejected' && user.kycRejectionReason && (
-        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
-          <strong>KYC rejected:</strong> {user.kycRejectionReason}
-        </div>
-      )}
-
       {/* Header */}
       <div>
         <div className="flex flex-wrap items-start gap-4">
@@ -1269,12 +982,6 @@ export function UserDetailPage() {
                 )}
               >
                 {getRoleLabel(user.role)}
-              </span>
-              <span
-                className="rounded-full px-2.5 py-1 text-xs font-semibold"
-                style={{ backgroundColor: `${kycColor}22`, color: kycColor }}
-              >
-                {getKycStatusLabel(user.kycStatus)}
               </span>
               {user.isBlocked && <Badge variant="red">Blocked</Badge>}
               {user.userType === 'pio' && (
@@ -1327,10 +1034,7 @@ export function UserDetailPage() {
             type="button"
             size="sm"
             variant="outline"
-            onClick={() => {
-              setEmailSubject(`BuiltGlory — ${user.name}`)
-              setEmailOpen(true)
-            }}
+            onClick={openEmailComposer}
           >
             📧 Email
           </Button>
@@ -1344,6 +1048,7 @@ export function UserDetailPage() {
                 : 'border-destructive/50 text-destructive',
             )}
             onClick={handleBlockClick}
+            disabled={!canReviewUser}
           >
             {user.isBlocked ? '✅ Unblock' : '🚫 Block User'}
           </Button>
@@ -1415,7 +1120,7 @@ export function UserDetailPage() {
       <div className="mt-6 grid gap-6 lg:grid-cols-[1fr_320px]">
         {/* Left column */}
         <div className="min-w-0 space-y-6">
-          {(user.userType === 'nri' || user.userType === 'pio') && (
+          {(user.userType === 'nri' || user.userType === 'pio') && canReviewFema && (
             <FemaComplianceCard
               user={user}
               toastApi={toastApi}
@@ -1430,293 +1135,6 @@ export function UserDetailPage() {
               }}
             />
           )}
-
-          {/* KYC */}
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-base">KYC Documents</CardTitle>
-              <p className="text-xs text-muted-foreground">📱 App screen: P-06</p>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {kycPushBanner === 'N-13' && (
-                <div className="rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-800">
-                  ✅ KYC verified. Notification N-13 sent to user.
-                </div>
-              )}
-              {showNameMismatch && (
-                <div className="rounded-lg border border-orange-200 bg-orange-50 px-3 py-2 text-sm text-orange-800">
-                  ⚠️ Name mismatch detected between profile and document. Verify
-                  carefully.
-                </div>
-              )}
-
-              {user.kycDocuments.length === 0 ? (
-                <div className="rounded-lg border border-dashed border-border bg-muted/20 px-4 py-8 text-center">
-                  <p className="text-sm text-muted-foreground">No documents uploaded yet</p>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="mt-3"
-                    onClick={() => {
-                      setWhatsappBody(KYC_REMINDER_TEMPLATE(user.name))
-                      setWhatsappOpen(true)
-                    }}
-                  >
-                    Send Reminder
-                  </Button>
-                </div>
-              ) : (
-                user.kycDocuments.map((doc, index) => (
-                  <div
-                    key={`${doc.type}-${index}`}
-                    className="rounded-lg border border-border p-3"
-                  >
-                    <div className="flex flex-wrap items-start justify-between gap-2">
-                      <div className="flex gap-2">
-                        <FileText className="mt-0.5 size-4 text-muted-foreground" />
-                        <div>
-                          <p className="font-medium text-sm">{doc.name}</p>
-                          <DocStatusBadge status={doc.status} />
-                          {doc.uploadedAt && (
-                            <p className="mt-1 text-xs text-muted-foreground">
-                              Uploaded {formatFullDate(doc.uploadedAt)}
-                            </p>
-                          )}
-                          {doc.verifiedAt && (
-                            <p className="text-xs text-green-700">
-                              Verified {formatFullDate(doc.verifiedAt)}
-                            </p>
-                          )}
-                          {doc.rejectionReason && (
-                            <p className="text-xs text-red-600">{doc.rejectionReason}</p>
-                          )}
-                          {doc.status === 'uploaded' && user.kycRejectionReason && (
-                            <Badge variant="blue" className="mt-1 text-xs">
-                              Resubmitted
-                            </Badge>
-                          )}
-                          {doc.status === 'uploaded' && user.kycRejectionReason && (
-                            <p className="mt-1 text-xs text-muted-foreground">
-                              Previous rejection: {user.kycRejectionReason}
-                            </p>
-                          )}
-                          {doc.status === 'expired' && (
-                            <p className="text-xs text-red-600">Please reupload</p>
-                          )}
-                        </div>
-                      </div>
-                      <div className="flex flex-wrap gap-1">
-                        {doc.status !== 'missing' && (
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            className="h-7 text-xs"
-                            onClick={() => setPreviewDoc(doc)}
-                          >
-                            View Document
-                          </Button>
-                        )}
-                        {(doc.status === 'uploaded' || doc.status === 'expired') && (
-                          <>
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="outline"
-                              className="h-7 border-green-300 text-xs text-green-700"
-                              onClick={() => handleVerifyDocument(index)}
-                            >
-                              {verifyPreviewDocIndex === index ? 'Confirm Verify' : '✅ Verify'}
-                            </Button>
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="outline"
-                              className="h-7 border-red-300 text-xs text-red-700"
-                              onClick={() => {
-                                setRejectDocIndex(index)
-                                setVerifyPreviewDocIndex(null)
-                                setRejectReason(REJECT_REASONS[0])
-                                setRejectNotes('')
-                              }}
-                            >
-                              ❌ Reject
-                            </Button>
-                          </>
-                        )}
-                        {verifyPreviewDocIndex === index && doc.status !== 'verified' && (
-                          <NotificationPreview
-                            notificationId="N-13"
-                            title={NOTIFICATION_TEMPLATES.N13_KYC_VERIFIED(user.name).title}
-                            body={NOTIFICATION_TEMPLATES.N13_KYC_VERIFIED(user.name).body}
-                            deepLink="P-06 KYC Documents"
-                            recipientLabel="user"
-                            className="mt-2"
-                          />
-                        )}
-                        {doc.status === 'verified' && (
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="ghost"
-                            className="h-7 text-xs text-red-600"
-                            disabled={actionSaving}
-                            onClick={() => {
-                              if (window.confirm(`Revoke verification for ${doc.name}?`)) {
-                                void withSession((accessToken) =>
-                                  updateAdminUserKyc(accessToken, user.id, {
-                                    status: 'pending',
-                                    documentUpdates: [
-                                      { documentId: doc.id, status: 'uploaded', rejectionReason: null },
-                                    ],
-                                    notes: `${doc.name} verification revoked.`,
-                                  }),
-                                ).then((updated) => {
-                                  if (!updated) return
-                                  replaceUser(updated)
-                                  showToast('Verification revoked')
-                                })
-                              }
-                            }}
-                          >
-                            Revoke
-                          </Button>
-                        )}
-                        {doc.status === 'rejected' && (
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            className="h-7 text-xs"
-                            disabled={actionSaving}
-                            onClick={() =>
-                              void withSession((accessToken) =>
-                                updateAdminUserKyc(accessToken, user.id, {
-                                  status: 'pending',
-                                  documentUpdates: [
-                                    { documentId: doc.id, status: 'uploaded', rejectionReason: null },
-                                  ],
-                                  notes: `${doc.name} marked for re-review.`,
-                                }),
-                              ).then((updated) => {
-                                if (!updated) return
-                                replaceUser(updated)
-                                showToast('Marked for re-review')
-                              })
-                            }
-                          >
-                            Re-review
-                          </Button>
-                        )}
-                        {doc.status === 'missing' && (
-                          <>
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="outline"
-                              className="h-7 border-green-300 text-xs text-green-700"
-                              onClick={() => handleVerifyDocument(index)}
-                            >
-                              ✅ Verify
-                            </Button>
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="outline"
-                              className="h-7 border-red-300 text-xs text-red-700"
-                              onClick={() => {
-                                setRejectDocIndex(index)
-                                setRejectReason(REJECT_REASONS[0])
-                                setRejectNotes('')
-                              }}
-                            >
-                              ❌ Reject
-                            </Button>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                    {rejectDocIndex === index && (
-                      <div className="mt-3 space-y-2 rounded-md bg-muted/40 p-3">
-                        <select
-                          value={rejectReason}
-                          onChange={(e) => setRejectReason(e.target.value)}
-                          className="h-9 w-full rounded-md border border-border bg-input px-2 text-sm"
-                        >
-                          {REJECT_REASONS.map((r) => (
-                            <option key={r} value={r}>
-                              {r}
-                            </option>
-                          ))}
-                        </select>
-                        <textarea
-                          value={rejectNotes}
-                          onChange={(e) => setRejectNotes(e.target.value)}
-                          placeholder={
-                            rejectReason === 'Other (specify below)'
-                              ? 'Details (required)'
-                              : 'Additional notes (optional)'
-                          }
-                          className="min-h-[60px] w-full rounded-md border border-border bg-input px-3 py-2 text-sm"
-                        />
-                        <NotificationPreview
-                          notificationId="N-14"
-                          title={NOTIFICATION_TEMPLATES.N14_KYC_REJECTED(
-                            user.name,
-                            rejectReason === 'Other (specify below)'
-                              ? rejectNotes.trim() || '…'
-                              : rejectNotes.trim()
-                                ? `${rejectReason}: ${rejectNotes.trim()}`
-                                : rejectReason,
-                          ).title}
-                          body={
-                            NOTIFICATION_TEMPLATES.N14_KYC_REJECTED(
-                              user.name,
-                              rejectReason === 'Other (specify below)'
-                                ? rejectNotes.trim() || '…'
-                                : rejectNotes.trim()
-                                  ? `${rejectReason}: ${rejectNotes.trim()}`
-                                  : rejectReason,
-                            ).body
-                          }
-                          deepLink="P-06 KYC Documents"
-                          recipientLabel="user"
-                        />
-                        <Button
-                          type="button"
-                          size="sm"
-                          className="bg-destructive text-destructive-foreground"
-                          onClick={() => handleRejectDocument(index)}
-                        >
-                          Reject & Notify
-                        </Button>
-                      </div>
-                    )}
-                  </div>
-                ))
-              )}
-
-              {overallKycMessage && (
-                <div
-                  className={cn(
-                    'rounded-lg px-3 py-2 text-sm font-medium',
-                    overallKycMessage.type === 'complete' && 'bg-green-50 text-green-800',
-                    overallKycMessage.type === 'rejected' && 'bg-red-50 text-red-800',
-                    overallKycMessage.type === 'pending' && 'bg-orange-50 text-orange-800',
-                    overallKycMessage.type === 'none' && 'bg-muted text-muted-foreground',
-                  )}
-                >
-                  {overallKycMessage.text}
-                  {overallKycMessage.type === 'complete' && overallKycMessage.date && (
-                    <span className="mt-1 block text-xs font-normal">
-                      Verified on {formatFullDate(overallKycMessage.date)}
-                    </span>
-                  )}
-                </div>
-              )}
-            </CardContent>
-          </Card>
 
           {/* Enquiries */}
           <Card>
@@ -2028,7 +1446,7 @@ export function UserDetailPage() {
                 label="Assigned To"
                 value={assigneeLabel(user.assignedTo, user.assignedToName)}
               />
-              {!profileEditOpen ? (
+              {!profileEditOpen && canEditUser ? (
                 <Button
                   type="button"
                   variant="outline"
@@ -2037,7 +1455,7 @@ export function UserDetailPage() {
                 >
                   Edit Profile
                 </Button>
-              ) : (
+              ) : !profileEditOpen ? null : (
                 <div className="space-y-3 border-t border-border pt-3">
                   <label className="block">
                     <span className="text-xs text-muted-foreground">Full Name</span>
@@ -2167,7 +1585,7 @@ export function UserDetailPage() {
                 type="button"
                 variant="outline"
                 className="w-full justify-start"
-                onClick={() => setEmailOpen(true)}
+                onClick={openEmailComposer}
               >
                 📧 Send Email
               </Button>
@@ -2179,7 +1597,7 @@ export function UserDetailPage() {
               >
                 🔔 Send Push Notification
               </Button>
-              {!user.isBlocked ? (
+              {canReviewUser && !user.isBlocked ? (
                 <>
                   {user.totalDeals > 0 && (
                     <p className="text-xs text-amber-600">
@@ -2196,7 +1614,7 @@ export function UserDetailPage() {
                     🚫 Block User
                   </Button>
                 </>
-              ) : (
+              ) : canReviewUser && user.isBlocked ? (
                 <Button
                   type="button"
                   variant="outline"
@@ -2210,7 +1628,7 @@ export function UserDetailPage() {
                 >
                   ✅ Unblock User
                 </Button>
-              )}
+              ) : null}
             </CardContent>
           </Card>
 
@@ -2297,7 +1715,8 @@ export function UserDetailPage() {
               <select
                 value={assignDraft}
                 onChange={(e) => setAssignDraft(e.target.value)}
-                className="h-9 w-full rounded-md border border-border bg-input px-2 text-sm"
+                disabled={!canEditUser}
+                className="h-9 w-full rounded-md border border-border bg-input px-2 text-sm disabled:cursor-not-allowed disabled:opacity-60"
               >
                 <option value="">Unassigned</option>
                 {assigneeOptions.map((o) => (
@@ -2306,44 +1725,34 @@ export function UserDetailPage() {
                   </option>
                 ))}
               </select>
-              <Button
-                type="button"
-                className="w-full"
-                disabled={actionSaving}
-                onClick={() => {
-                  void withSession((accessToken) =>
-                    updateAdminUserProfile(accessToken, user.id, {
-                      assignedTo: assignDraft || null,
-                    }),
-                  ).then((updated) => {
-                    if (!updated) return
-                    replaceUser(updated)
-                    showToast(assignDraft ? 'Assignment saved' : 'User unassigned')
-                  })
-                }}
-              >
-                Save
-              </Button>
+              {canEditUser ? (
+                <Button
+                  type="button"
+                  className="w-full"
+                  disabled={actionSaving}
+                  onClick={() => {
+                    void withSession((accessToken) =>
+                      updateAdminUserProfile(accessToken, user.id, {
+                        assignedTo: assignDraft || null,
+                      }),
+                    ).then((updated) => {
+                      if (!updated) return
+                      replaceUser(updated)
+                      showToast(assignDraft ? 'Assignment saved' : 'User unassigned')
+                    })
+                  }}
+                >
+                  Save
+                </Button>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  You do not have permission to change assignment.
+                </p>
+              )}
             </CardContent>
           </Card>
         </div>
       </div>
-
-      {previewDoc && user && (
-        <DocumentPreviewModal
-          doc={previewDoc}
-          onClose={() => setPreviewDoc(null)}
-          onToast={showToast}
-          onVerify={
-            previewDoc.status === 'uploaded'
-              ? () => {
-                  const index = user.kycDocuments.findIndex((d) => d.name === previewDoc.name)
-                  if (index >= 0) handleVerifyDocument(index)
-                }
-              : undefined
-          }
-        />
-      )}
 
       {/* Modals */}
       {whatsappOpen && (
@@ -2374,8 +1783,18 @@ export function UserDetailPage() {
         </Modal>
       )}
 
-      {emailOpen && (
+      {emailOpen && user && (
         <Modal title="Send Email" onClose={() => setEmailOpen(false)}>
+          <div className="mb-3 space-y-1 rounded-md border border-border bg-muted/40 px-3 py-2 text-sm">
+            <p>
+              <span className="text-muted-foreground">From:</span>{' '}
+              <span className="font-medium">{ADMIN_SENDER_EMAIL}</span>
+            </p>
+            <p>
+              <span className="text-muted-foreground">To:</span>{' '}
+              <span className="font-medium">{user.email}</span>
+            </p>
+          </div>
           <input
             value={emailSubject}
             onChange={(e) => setEmailSubject(e.target.value)}
@@ -2390,26 +1809,10 @@ export function UserDetailPage() {
           />
           <Button
             className="mt-3 w-full"
-            disabled={!user?.email}
-            onClick={() => {
-              if (!user) return
-              if (!user.email) {
-                showToast('No email on file')
-                return
-              }
-              logUserMessage({
-                channel: 'email',
-                to: user.email,
-                toName: user.name,
-                subject: emailSubject,
-                message: emailBody,
-              })
-              openEmail(user.email, emailSubject, emailBody)
-              setEmailOpen(false)
-              showToast('Email sent')
-            }}
+            disabled={!user?.email || !emailSubject.trim() || !emailBody.trim() || emailSending}
+            onClick={() => void sendUserEmail()}
           >
-            Send
+            {emailSending ? 'Sending…' : 'Send'}
           </Button>
         </Modal>
       )}

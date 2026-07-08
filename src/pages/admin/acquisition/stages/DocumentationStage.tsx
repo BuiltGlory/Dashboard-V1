@@ -151,7 +151,6 @@ const REVIEW_CATEGORIES = [
   { id: 'loan_encumbrance', label: 'Loan & Encumbrance verified' },
   { id: 'court_records', label: 'Court Records verified' },
   { id: 'govt_acquisition', label: 'Government Acquisition Records verified' },
-  { id: 'kyc', label: 'Identity & KYC verified' },
   { id: 'ownership', label: 'Ownership type documents verified' },
 ] as const
 

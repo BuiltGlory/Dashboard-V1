@@ -60,6 +60,7 @@ import {
   type AdminContentPayload,
   type ContentStatus,
 } from '@/api/adminContent'
+import { DEFAULT_ROLE_PERMISSIONS } from '@/config/adminPermissions'
 
 function ticketNoResponse48h(ticket: SupportTicket): boolean {
   const hours = (Date.now() - new Date(ticket.createdAt).getTime()) / 3600000
@@ -68,27 +69,77 @@ function ticketNoResponse48h(ticket: SupportTicket): boolean {
 
 type SettingsTab = 'support' | 'feedback' | 'access' | 'general' | 'legal' | 'audit'
 
-const PERMISSION_LABEL_TO_BACKEND: Record<string, string> = {
+const PERMISSION_LABEL_TO_BACKEND: Record<string, string | string[]> = {
+  'View Buy Enquiries': 'enquiries.read',
+  'Respond to Enquiries': 'enquiries.write',
+  'View Sell Requests': 'enquiries.read',
+  'Delete Enquiries': 'enquiries.write',
+  'View Acquisition Pipeline': 'acquisitions.read',
+  'Update Acquisition Stages': 'acquisitions.write',
+  'View Sales Pipeline': 'sales.read',
+  'Update Sales Stages': 'sales.write',
   'View Properties': 'properties.read',
-  'Add/Edit Properties': 'properties.write',
-  'Publish Properties': 'properties.publish',
+  'Add Properties': 'properties.write',
+  'Edit Properties': 'properties.write',
+  'Delete Properties': 'properties.write',
+  'Bulk Upload': 'properties.write',
   'View Users': 'users.read',
-  'KYC Review': 'users.kyc.review',
-  'FEMA Review': 'users.fema.review',
-  'View Enquiries': 'enquiries.read',
-  'Manage Enquiries': 'enquiries.write',
-  'View Acquisitions': 'acquisitions.read',
-  'Update Acquisition': 'acquisitions.write',
-  'View Sales': 'sales.read',
-  'Update Sales': 'sales.write',
-  'View Visits': 'visits.read',
-  'Manage Visits': 'visits.write',
+  'Block Users': 'users.write',
+  'Edit Users': 'users.write',
+  'View Reports': ['sales.read', 'audit.read'],
+  'Export Data': 'audit.read',
+  'App Content': 'support.write',
+  Pricing: 'properties.write',
+  Templates: 'support.write',
+  'Bulk Message': 'support.write',
   'Support Tickets': 'support.read',
   Feedback: 'support.read',
   'Access Control': 'admin.access.manage',
+  Settings: 'admin.access.manage',
   'Legal Content': 'support.write',
   'Audit Trail': 'audit.read',
-  'View Reports': 'audit.read',
+}
+
+function backendPermsForLabel(label: string): string[] {
+  const mapped = PERMISSION_LABEL_TO_BACKEND[label]
+  if (!mapped) return []
+  return Array.isArray(mapped) ? mapped : [mapped]
+}
+
+function labelIsGranted(label: string, active: Set<string>) {
+  const perms = backendPermsForLabel(label)
+  return perms.length > 0 && perms.some((perm) => active.has(perm))
+}
+
+function effectiveAdminPermissions(admin: AdminUser | undefined): string[] {
+  if (!admin) return []
+  if (admin.permissions.length > 0) return admin.permissions
+  return DEFAULT_ROLE_PERMISSIONS[mapAdminRoleToBackend(admin.role)] ?? []
+}
+
+function permissionsFromBackend(backendPerms: string[]) {
+  const active = new Set(backendPerms)
+  return Object.fromEntries(
+    Object.values(PERMISSION_SECTIONS)
+      .flat()
+      .map((label) => [label, labelIsGranted(label, active)]),
+  )
+}
+
+function permissionsForRole(
+  role: AdminRole,
+  admins: AdminUser[],
+  overrides: Partial<Record<AdminRole, string[]>>,
+) {
+  const override = overrides[role]
+  if (override) return permissionsFromBackend(override)
+  const roleAdmin = admins.find((admin) => admin.role === role)
+  if (roleAdmin) return permissionsFromBackend(effectiveAdminPermissions(roleAdmin))
+  return permissionsFromBackend(DEFAULT_ROLE_PERMISSIONS[mapAdminRoleToBackend(role)] ?? [])
+}
+
+function adminsForDisplayRole(role: AdminRole, admins: AdminUser[]) {
+  return admins.filter((admin) => admin.role === role)
 }
 
 type AdminContactDetails = {
@@ -224,20 +275,13 @@ function mapAdminOperator(operator: AdminOperator, currentEmail?: string): Admin
   }
 }
 
-function permissionsForAdmin(admin: AdminUser | undefined) {
-  const active = new Set(admin?.permissions ?? [])
-  return Object.fromEntries(
-    Object.values(PERMISSION_SECTIONS)
-      .flat()
-      .map((label) => [label, active.has(PERMISSION_LABEL_TO_BACKEND[label])]),
-  )
-}
-
 function backendPermissionsFromLabels(permissions: Record<string, boolean>) {
-  return Object.entries(permissions)
-    .filter(([, enabled]) => enabled)
-    .map(([label]) => PERMISSION_LABEL_TO_BACKEND[label])
-    .filter((permission): permission is string => Boolean(permission))
+  const result = new Set<string>()
+  for (const [label, enabled] of Object.entries(permissions)) {
+    if (!enabled) continue
+    backendPermsForLabel(label).forEach((perm) => result.add(perm))
+  }
+  return [...result]
 }
 
 type AuditEntry = AdminAuditEntry
@@ -262,7 +306,7 @@ const PERMISSION_SECTIONS: Record<string, string[]> = {
     'Delete Properties',
     'Bulk Upload',
   ],
-  USERS: ['View Users', 'Block Users', 'Edit Users', 'KYC Verification'],
+  USERS: ['View Users', 'Block Users', 'Edit Users'],
   REPORTS: ['View Reports', 'Export Data'],
   TOOLS: ['App Content', 'Pricing', 'Templates', 'Bulk Message'],
   ADMIN: ['Support Tickets', 'Feedback', 'Access Control', 'Settings', 'Legal Content', 'Audit Trail'],
@@ -420,15 +464,9 @@ export function AdminPage() {
 
   const [admins, setAdmins] = useState<AdminUser[]>([])
   const [permModalRole, setPermModalRole] = useState<string | null>(null)
-  const [permissions, setPermissions] = useState<Record<string, boolean>>(() => {
-    const init: Record<string, boolean> = {}
-    Object.values(PERMISSION_SECTIONS)
-      .flat()
-      .forEach((p) => {
-        init[p] = p.startsWith('View') || p.includes('Respond') || p.includes('Update Acquisition') || p.includes('Update Sales')
-      })
-    return init
-  })
+  const [permissions, setPermissions] = useState<Record<string, boolean>>(() =>
+    permissionsFromBackend(DEFAULT_ROLE_PERMISSIONS.admin ?? []),
+  )
 
   const [company, setCompany] = useState({
     name: 'Builtglory',
@@ -1046,6 +1084,10 @@ function AccessTabFull({
     assignedArea: '',
   })
   const [confirmRemoveSales, setConfirmRemoveSales] = useState<SalesPerson | null>(null)
+  const [rolePermissionOverrides, setRolePermissionOverrides] = useState<
+    Partial<Record<AdminRole, string[]>>
+  >({})
+  const [salesFormErrors, setSalesFormErrors] = useState<Record<string, string>>({})
 
   const superAdminCount = useMemo(
     () => admins.filter((a) => a.role === 'Super Admin').length,
@@ -1145,6 +1187,10 @@ function AccessTabFull({
     }
 
     const emailNorm = form.email.trim().toLowerCase()
+    const rolePermissions =
+      rolePermissionOverrides[form.role] ??
+      DEFAULT_ROLE_PERMISSIONS[mapAdminRoleToBackend(form.role)] ??
+      []
     const payload = {
       name: form.name.trim(),
       email: emailNorm,
@@ -1157,6 +1203,7 @@ function AccessTabFull({
         .map((area) => area.trim())
         .filter(Boolean),
       status: (form.active ? 'active' : 'suspended') as AdminUser['status'],
+      permissions: rolePermissions,
     }
 
     try {
@@ -1277,6 +1324,7 @@ function AccessTabFull({
       role: 'sales_executive',
       assignedArea: '',
     })
+    setSalesFormErrors({})
     setSalesFormOpen(true)
   }
 
@@ -1289,14 +1337,27 @@ function AccessTabFull({
       role: person.role,
       assignedArea: person.assignedArea.join(', '),
     })
+    setSalesFormErrors({})
     setSalesFormOpen(true)
   }
 
-  const saveSalesPerson = async () => {
-    if (!salesDraft.name.trim() || !salesDraft.phone.trim()) {
-      showToast('Name and phone required')
-      return
+  const validateSalesForm = () => {
+    const errors: Record<string, string> = {}
+    if (!salesDraft.name.trim()) errors.salesName = 'Full name is required'
+    if (!salesDraft.phone.trim()) errors.salesPhone = 'Phone number is required'
+    else if (!/^\+?[\d\s-]{10,}$/.test(salesDraft.phone.trim())) {
+      errors.salesPhone = 'Enter a valid phone number'
     }
+    const emailNorm = salesDraft.email.trim()
+    if (emailNorm && !EMAIL_REGEX.test(emailNorm)) {
+      errors.salesEmail = 'Enter a valid email address'
+    }
+    setSalesFormErrors(errors)
+    return Object.keys(errors).length === 0
+  }
+
+  const saveSalesPerson = async () => {
+    if (!validateSalesForm()) return
     const areas = salesDraft.assignedArea
       .split(',')
       .map((a) => a.trim())
@@ -1356,7 +1417,7 @@ function AccessTabFull({
   const fieldClass = (key: string) =>
     cn(
       'mt-1 h-9 w-full rounded-md border bg-input px-3 text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/20',
-      formErrors[key] ? 'border-red-500' : 'border-border',
+      formErrors[key] || salesFormErrors[key] ? 'border-red-500' : 'border-border',
     )
 
   return (
@@ -1519,6 +1580,9 @@ function AccessTabFull({
                         </option>
                       ))}
                     </select>
+                    {formErrors.role && (
+                      <p className="mt-1 text-xs text-red-600">{formErrors.role}</p>
+                    )}
                   </label>
                   <label className="block text-sm">
                     Department
@@ -1784,6 +1848,9 @@ function AccessTabFull({
                     onChange={(e) => setSalesDraft((d) => ({ ...d, name: e.target.value }))}
                     className={fieldClass('salesName')}
                   />
+                  {salesFormErrors.salesName && (
+                    <p className="mt-1 text-xs text-red-600">{salesFormErrors.salesName}</p>
+                  )}
                 </label>
                 <label className="block text-sm">
                   Phone *
@@ -1792,6 +1859,9 @@ function AccessTabFull({
                     onChange={(e) => setSalesDraft((d) => ({ ...d, phone: e.target.value }))}
                     className={fieldClass('salesPhone')}
                   />
+                  {salesFormErrors.salesPhone && (
+                    <p className="mt-1 text-xs text-red-600">{salesFormErrors.salesPhone}</p>
+                  )}
                 </label>
                 <label className="block text-sm">
                   Email
@@ -1801,6 +1871,9 @@ function AccessTabFull({
                     onChange={(e) => setSalesDraft((d) => ({ ...d, email: e.target.value }))}
                     className={fieldClass('salesEmail')}
                   />
+                  {salesFormErrors.salesEmail && (
+                    <p className="mt-1 text-xs text-red-600">{salesFormErrors.salesEmail}</p>
+                  )}
                 </label>
                 <label className="block text-sm">
                   Role
@@ -2064,46 +2137,55 @@ function AccessTabFull({
             <CardContent className="p-4">
               <Badge className="bg-purple-100 text-purple-800">Super Admin</Badge>
               <p className="mt-2 text-sm text-muted-foreground">Full access to everything</p>
-              <p className="mt-1 text-xs">Assigned: 1 user</p>
+              <p className="mt-1 text-xs">
+                Assigned: {superAdminCount} user{superAdminCount === 1 ? '' : 's'}
+              </p>
               <p className="mt-2 text-xs italic text-muted-foreground">Cannot be edited or deleted</p>
             </CardContent>
           </Card>
-          {[
-            {
-              role: 'Admin',
-              badge: 'bg-blue-100 text-blue-800',
-              perms: [
-                '✅ View all sections',
-                '✅ Edit properties',
-                '✅ Manage users',
-                '✅ View reports',
-                '❌ Access Control',
-                '❌ Delete data',
-              ],
-            },
-            {
-              role: 'Operations',
-              badge: 'bg-green-100 text-green-800',
-              perms: [
-                '✅ View enquiries',
-                '✅ Manage visits',
-                '✅ Update pipeline',
-                '❌ Delete properties',
-                '❌ Manage users',
-                '❌ Reports',
-              ],
-            },
-            {
-              role: 'Support',
-              badge: 'bg-orange-100 text-orange-800',
-              perms: ['✅ View tickets', '✅ Respond to tickets', '❌ Everything else'],
-            },
-          ].map((r) => (
+          {(
+            [
+              {
+                role: 'Admin' as AdminRole,
+                badge: 'bg-blue-100 text-blue-800',
+                perms: [
+                  '✅ View all sections',
+                  '✅ Edit properties',
+                  '✅ Manage users',
+                  '✅ View reports',
+                  '❌ Access Control',
+                  '❌ Delete data',
+                ],
+              },
+              {
+                role: 'Operations' as AdminRole,
+                badge: 'bg-green-100 text-green-800',
+                perms: [
+                  '✅ View enquiries',
+                  '✅ Manage visits',
+                  '✅ Update pipeline',
+                  '❌ Delete properties',
+                  '❌ Manage users',
+                  '❌ Reports',
+                ],
+              },
+              {
+                role: 'Support' as AdminRole,
+                badge: 'bg-orange-100 text-orange-800',
+                perms: ['✅ View tickets', '✅ Respond to tickets', '❌ Everything else'],
+              },
+            ] as const
+          ).map((r) => {
+            const assignedCount = adminsForDisplayRole(r.role, admins).length
+            return (
             <Card key={r.role}>
               <CardContent className="p-4">
                 <span className={cn('rounded-full px-2 py-0.5 text-xs font-medium', r.badge)}>
                   {r.role}
                 </span>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Assigned: {assignedCount} user{assignedCount === 1 ? '' : 's'}
+                </p>
                 <ul className="mt-2 space-y-1 text-sm">
                   {r.perms.map((p) => (
                     <li key={p}>{p}</li>
@@ -2115,8 +2197,7 @@ function AccessTabFull({
                   variant="outline"
                   className="mt-3"
                   onClick={() => {
-                    const adminForRole = admins.find((admin) => admin.role === r.role)
-                    setPermissions(permissionsForAdmin(adminForRole))
+                    setPermissions(permissionsForRole(r.role, admins, rolePermissionOverrides))
                     setPermModalRole(r.role)
                   }}
                 >
@@ -2124,7 +2205,8 @@ function AccessTabFull({
                 </Button>
               </CardContent>
             </Card>
-          ))}
+            )
+          })}
         </div>
       </div>
 
@@ -2200,26 +2282,33 @@ function AccessTabFull({
                   showToast('Admin session expired. Please sign in again.')
                   return
                 }
-                const selected = admins.filter((admin) => admin.role === permModalRole)
-                if (selected.length === 0) {
-                  showToast(`No ${permModalRole} admins found to update`)
-                  setPermModalRole(null)
+                const role = permModalRole as AdminRole
+                const selected = adminsForDisplayRole(role, admins)
+                const nextPermissions = backendPermissionsFromLabels(permissions)
+                if (nextPermissions.length === 0) {
+                  showToast('Select at least one permission')
                   return
                 }
-                const nextPermissions = backendPermissionsFromLabels(permissions)
                 try {
-                  const updated = await Promise.all(
-                    selected.map((admin) =>
-                      updateAdminOperatorPermissions(session.accessToken, admin.id, nextPermissions),
-                    ),
+                  if (selected.length > 0) {
+                    const updated = await Promise.all(
+                      selected.map((admin) =>
+                        updateAdminOperatorPermissions(session.accessToken, admin.id, nextPermissions),
+                      ),
+                    )
+                    setAdmins((prev) =>
+                      prev.map((admin) => {
+                        const match = updated.find((item) => item.id === admin.id)
+                        return match ? mapAdminOperator(match, session.admin.email) : admin
+                      }),
+                    )
+                  }
+                  setRolePermissionOverrides((prev) => ({ ...prev, [role]: nextPermissions }))
+                  showToast(
+                    selected.length > 0
+                      ? `Permissions saved for ${selected.length} ${role} user${selected.length === 1 ? '' : 's'}`
+                      : `${role} permission template saved for future admins`,
                   )
-                  setAdmins((prev) =>
-                    prev.map((admin) => {
-                      const match = updated.find((item) => item.id === admin.id)
-                      return match ? mapAdminOperator(match, session.admin.email) : admin
-                    }),
-                  )
-                  showToast('Permissions saved')
                   setPermModalRole(null)
                 } catch (error) {
                   showToast(error instanceof Error ? error.message : 'Unable to save permissions.')
@@ -2535,10 +2624,6 @@ function GeneralTabContent({
         type="checkbox"
         checked={appToggles[key]}
         onChange={(e) => {
-          if (key === 'kycRequired' && !e.target.checked) {
-            showToast('Cannot disable KYC while active deals exist')
-            return
-          }
           setAppToggles((prev) => ({ ...prev, [key]: e.target.checked }))
         }}
       />
@@ -2726,7 +2811,6 @@ function GeneralTabContent({
             />
           </div>
           {toggleRow('registration', 'New User Registration', 'Allow new users to register')}
-          {toggleRow('kycRequired', 'KYC Required', 'Require KYC before enquiring')}
           {toggleRow('showPrices', 'Show Property Prices', 'Show prices on listing cards')}
           {toggleRow('virtualTours', 'Enable Virtual Tours', 'Show AR/VR tour option')}
           {toggleRow('stagePayment', 'Stage Payment Feature', 'Enable stage payment option')}
@@ -2878,7 +2962,6 @@ function GeneralTabContent({
               ['slaBreached', 'SLA Breach', `→ ${adminContact.email} + WhatsApp ${adminContact.phone}`],
               ['interiorInquiry', 'New interior inquiry', null],
               ['stagePayment', 'New stage payment request', null],
-              ['kycReview', 'KYC submitted for review', null],
               ['ticket48', 'Support ticket open > 48hrs', null],
             ] as const
           ).map(([key, label, subText]) => (
@@ -3026,7 +3109,6 @@ function GeneralTabContent({
                 `→ ${adminContact.email} + WhatsApp ${adminContact.phone}`,
               ],
               ['sell', 'New Listing', `→ ${adminContact.email}`],
-              ['kyc', 'KYC submitted', null],
               ['user', 'New user registered', null],
               ['stageProof', 'Stage payment proof uploaded', null],
               ['ticket', 'Support ticket created', null],

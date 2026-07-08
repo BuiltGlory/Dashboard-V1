@@ -11,6 +11,7 @@ import type {
   PropertyStatus,
   PropertyType,
 } from '@/domain/properties'
+import { normalizePropertyTypeKey } from '@/domain/properties'
 
 type ApiMeta = {
   requestId?: string
@@ -176,7 +177,7 @@ function mapProperty(raw: RawEntity): Property {
     referenceId: stringOf(raw.referenceId, idOf(raw)),
     title: stringOf(raw.title, 'Untitled property'),
     description: stringOf(raw.description),
-    type: stringOf(raw.type, 'plot') as PropertyType,
+    type: normalizePropertyTypeKey(stringOf(raw.type)) ?? (stringOf(raw.type, 'plot') as PropertyType),
     status: stringOf(raw.status, 'draft') as PropertyStatus,
     source: stringOf(raw.source, 'manual') as PropertySource,
     isFeatured: booleanOf(raw.isFeatured),

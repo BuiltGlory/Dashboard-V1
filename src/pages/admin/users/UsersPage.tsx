@@ -1,18 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router'
 import {
-  CheckCircle,
-  ChevronDown,
-  ChevronUp,
-  Clock,
   FilterX,
   LayoutGrid,
   List,
-  Minus,
   MoreVertical,
   Search,
   SearchX,
-  ShieldCheck,
   Users,
   XCircle,
 } from 'lucide-react'
@@ -21,13 +15,10 @@ import { Button } from '@/components/ui/button'
 import { readAdminSession } from '@/api/admin'
 import {
   getFemaBadgeLabel,
-  getKycStatusColor,
-  getKycStatusLabel,
   getRoleLabel,
   getUserTypeBadgeColor,
   listAdminUsers,
   shouldShowFemaWarning,
-  type KycStatus,
   type User,
   type UserRole,
   type UserType,
@@ -44,15 +35,13 @@ function openWhatsApp(phone: string) {
   window.open(`https://wa.me/${phoneDigits(phone)}`, '_blank')
 }
 
-type PageTab = 'all' | 'kyc' | 'buyers' | 'sellers'
+type PageTab = 'all' | 'buyers' | 'sellers'
 type ViewMode = 'table' | 'card'
 type RoleFilter = 'all' | UserRole
-type KycFilter = 'all' | KycStatus
 type BuyersChipFilter = 'all' | 'active' | 'past' | 'high_value'
-type SellersChipFilter = 'all' | 'active' | 'kyc_verified' | 'not_verified'
+type SellersChipFilter = 'all' | 'active'
 
 const VIEW_STORAGE_KEY = 'builtglory-users-view'
-const HOURS_48_MS = 48 * 60 * 60 * 1000
 const DAYS_90_MS = 90 * 24 * 60 * 60 * 1000
 const AVG_DEAL_VALUE = 4_500_000
 const HIGH_VALUE_DEAL_THRESHOLD = 2
@@ -77,7 +66,6 @@ const COUNTRY_FLAGS: Record<string, string> = {
 }
 
 function getPageTab(pathname: string): PageTab {
-  if (pathname.includes('/users/kyc')) return 'kyc'
   if (pathname.includes('/users/buyers')) return 'buyers'
   if (pathname.includes('/users/sellers')) return 'sellers'
   return 'all'
@@ -114,14 +102,6 @@ function formatTimeAgo(iso: string) {
   return `${months}mo ago`
 }
 
-function formatShortDate(iso: string) {
-  return new Date(iso).toLocaleDateString('en-IN', {
-    day: 'numeric',
-    month: 'short',
-    year: 'numeric',
-  })
-}
-
 function getInitials(name: string) {
   return name
     .split(' ')
@@ -130,11 +110,6 @@ function getInitials(name: string) {
     .slice(0, 2)
     .join('')
     .toUpperCase()
-}
-
-function isKycOverdue(user: User) {
-  if (user.kycStatus !== 'pending' || !user.kycSubmittedAt) return false
-  return Date.now() - new Date(user.kycSubmittedAt).getTime() > HOURS_48_MS
 }
 
 function getTotalSpent(user: User) {
@@ -162,8 +137,6 @@ function matchesBuyersChip(user: User, chip: BuyersChipFilter) {
 function matchesSellersChip(user: User, chip: SellersChipFilter) {
   if (chip === 'all') return true
   if (chip === 'active') return user.totalListings > 0
-  if (chip === 'kyc_verified') return user.kycStatus === 'verified'
-  if (chip === 'not_verified') return user.kycStatus !== 'verified'
   return true
 }
 
@@ -197,11 +170,6 @@ function matchesSearch(user: User, q: string) {
 function matchesRoleFilter(user: User, role: RoleFilter) {
   if (role === 'all') return true
   return user.role === role
-}
-
-function matchesKycFilter(user: User, kyc: KycFilter) {
-  if (kyc === 'all') return true
-  return user.kycStatus === kyc
 }
 
 function tabBaseFilter(user: User, tab: PageTab) {
@@ -277,38 +245,6 @@ function RoleBadge({ role }: { role: UserRole }) {
     >
       {getRoleLabel(role)}
     </span>
-  )
-}
-
-function KycStatusBadge({ user }: { user: User }) {
-  const color = getKycStatusColor(user.kycStatus)
-  const Icon =
-    user.kycStatus === 'verified'
-      ? ShieldCheck
-      : user.kycStatus === 'pending'
-        ? Clock
-        : user.kycStatus === 'rejected'
-          ? XCircle
-          : Minus
-
-  return (
-    <div className="flex flex-col gap-1">
-      <span
-        className="inline-flex w-fit items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium"
-        style={{ backgroundColor: `${color}22`, color }}
-      >
-        <Icon className="size-3" />
-        {getKycStatusLabel(user.kycStatus)}
-      </span>
-      {isKycOverdue(user) && (
-        <span className="text-[10px] font-semibold text-orange-600">Overdue</span>
-      )}
-      {user.kycSubmittedAt && user.kycStatus !== 'not_submitted' && (
-        <span className="text-[10px] text-muted-foreground">
-          {formatShortDate(user.kycSubmittedAt)}
-        </span>
-      )}
-    </div>
   )
 }
 
@@ -582,7 +518,6 @@ function UsersTable({
             {showTotalSpent && (
               <th className="w-[120px] px-4 py-3">Total Spent</th>
             )}
-            <th className="w-[140px] px-4 py-3">KYC Status</th>
             <th className="w-[160px] px-4 py-3">Activity</th>
             <th className="w-[120px] px-4 py-3">Location</th>
             <th className="w-[100px] px-4 py-3">Registered</th>
@@ -648,9 +583,6 @@ function UsersTable({
                   </span>
                 </td>
               )}
-              <td className="px-4 py-2">
-                <KycStatusBadge user={user} />
-              </td>
               <td className="px-4 py-2">
                 <ActivityCell user={user} />
               </td>
@@ -761,7 +693,6 @@ function UserCard({
               {showSellerStats && <SellerListingStats user={user} />}
             </div>
           </div>
-          <KycStatusBadge user={user} />
         </div>
       </div>
 
@@ -831,154 +762,6 @@ type SectionAction = {
   onClick: (user: User) => void
 }
 
-function KycTabLayout({
-  users,
-  viewMode,
-  onRowClick,
-  onPatch,
-  onToast,
-  onRequestBlock,
-}: {
-  users: User[]
-  viewMode: ViewMode
-  onRowClick: (id: string) => void
-  onPatch: (id: string, patch: Partial<User>) => void | Promise<void>
-  onToast: (msg: string) => void
-  onRequestBlock?: (user: User) => void
-}) {
-  const [verifiedOpen, setVerifiedOpen] = useState(false)
-
-  const pending = useMemo(
-    () =>
-      [...users.filter((u) => u.kycStatus === 'pending')].sort((a, b) => {
-        const ta = a.kycSubmittedAt ? new Date(a.kycSubmittedAt).getTime() : 0
-        const tb = b.kycSubmittedAt ? new Date(b.kycSubmittedAt).getTime() : 0
-        return ta - tb
-      }),
-    [users],
-  )
-  const rejected = useMemo(
-    () => users.filter((u) => u.kycStatus === 'rejected'),
-    [users],
-  )
-  const notSubmitted = useMemo(
-    () => users.filter((u) => u.kycStatus === 'not_submitted'),
-    [users],
-  )
-  const verified = useMemo(
-    () => users.filter((u) => u.kycStatus === 'verified'),
-    [users],
-  )
-
-  const kycAllVerifiedCelebration =
-    users.length > 0 && users.every((u) => u.kycStatus === 'verified')
-
-  if (kycAllVerifiedCelebration) {
-    return (
-      <div className="flex min-h-[320px] flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-border bg-muted/20 px-6 text-center">
-        <CheckCircle className="size-16 text-green-600" />
-        <p className="text-sm font-medium text-foreground">
-          All KYC verifications complete! 🎉
-        </p>
-      </div>
-    )
-  }
-
-  const renderList = (list: User[], sectionAction?: SectionAction) => {
-    if (list.length === 0) return null
-    if (viewMode === 'card') {
-      return (
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {list.map((u) => (
-            <UserCard
-              key={u.id}
-              user={u}
-              pageTab="kyc"
-              onView={() => onRowClick(u.id)}
-              onToast={onToast}
-            />
-          ))}
-        </div>
-      )
-    }
-    return (
-      <UsersTable
-        users={list}
-        pageTab="kyc"
-        onRowClick={onRowClick}
-        onPatch={onPatch}
-        onToast={onToast}
-        onRequestBlock={onRequestBlock}
-        sectionAction={sectionAction}
-      />
-    )
-  }
-
-  return (
-    <div className="space-y-8">
-      {pending.length > 0 && (
-        <section>
-          <h2 className="mb-3 text-sm font-semibold text-orange-600">
-            Pending Review ({pending.length})
-          </h2>
-          {renderList(pending, {
-            label: 'Review KYC',
-            variant: 'default',
-            onClick: (u) => onRowClick(u.id),
-          })}
-        </section>
-      )}
-
-      {rejected.length > 0 && (
-        <section>
-          <h2 className="mb-3 text-sm font-semibold text-red-600">
-            Rejected ({rejected.length})
-          </h2>
-          {renderList(rejected, {
-            label: 'Re-review',
-            variant: 'outline',
-            onClick: (u) => {
-              onToast(`Re-review started for ${u.name}`)
-              onRowClick(u.id)
-            },
-          })}
-        </section>
-      )}
-
-      {notSubmitted.length > 0 && (
-        <section>
-          <h2 className="mb-3 text-sm font-semibold text-muted-foreground">
-            Not Submitted ({notSubmitted.length})
-          </h2>
-          {renderList(notSubmitted, {
-            label: 'Send Reminder',
-            variant: 'outline',
-            onClick: (u) => openWhatsApp(u.phone),
-          })}
-        </section>
-      )}
-
-      {verified.length > 0 && (
-        <section>
-          <button
-            type="button"
-            className="mb-3 flex w-full items-center justify-between rounded-lg bg-green-50 px-4 py-2 text-left text-sm font-semibold text-green-800 dark:bg-green-950/40 dark:text-green-300"
-            onClick={() => setVerifiedOpen((o) => !o)}
-          >
-            <span>Verified ({verified.length})</span>
-            {verifiedOpen ? (
-              <ChevronUp className="size-4" />
-            ) : (
-              <ChevronDown className="size-4" />
-            )}
-          </button>
-          {verifiedOpen && renderList(verified)}
-        </section>
-      )}
-    </div>
-  )
-}
-
 export function UsersPage() {
   const navigate = useNavigate()
   const { pathname } = useLocation()
@@ -988,7 +771,6 @@ export function UsersPage() {
   const [users, setUsers] = useState<User[]>([])
   const [search, setSearch] = useState('')
   const [roleFilter, setRoleFilter] = useState<RoleFilter>('all')
-  const [kycFilter, setKycFilter] = useState<KycFilter>('all')
   const [viewMode, setViewMode] = useState<ViewMode>(() => loadViewMode())
   const [toast, setToast] = useState<string | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -1090,12 +872,11 @@ export function UsersPage() {
       if (!tabBaseFilter(u, pageTab)) return false
       if (!matchesSearch(u, q)) return false
       if (!matchesRoleFilter(u, roleFilter)) return false
-      if (!matchesKycFilter(u, kycFilter)) return false
       if (pageTab === 'buyers' && !matchesBuyersChip(u, buyersChip)) return false
       if (pageTab === 'sellers' && !matchesSellersChip(u, sellersChip)) return false
       return true
     })
-  }, [users, pageTab, search, roleFilter, kycFilter, buyersChip, sellersChip])
+  }, [users, pageTab, search, roleFilter, buyersChip, sellersChip])
 
   const emptyKind = useMemo(() => {
     if (users.length === 0) return 'none' as const
@@ -1107,11 +888,10 @@ export function UsersPage() {
 
   const filterEmptyLabel = useMemo(() => {
     if (roleFilter !== 'all') return getRoleLabel(roleFilter).toLowerCase()
-    if (kycFilter !== 'all') return getKycStatusLabel(kycFilter).toLowerCase()
     if (pageTab === 'buyers') return 'buyer'
     if (pageTab === 'sellers') return 'seller'
     return 'matching'
-  }, [roleFilter, kycFilter, pageTab])
+  }, [roleFilter, pageTab])
 
   const buyersChipOptions: { key: BuyersChipFilter; label: string }[] = [
     { key: 'all', label: 'All Buyers' },
@@ -1123,8 +903,6 @@ export function UsersPage() {
   const sellersChipOptions: { key: SellersChipFilter; label: string }[] = [
     { key: 'all', label: 'All Sellers' },
     { key: 'active', label: 'Active Sellers' },
-    { key: 'kyc_verified', label: 'KYC Verified' },
-    { key: 'not_verified', label: 'Not Verified' },
   ]
 
   return (
@@ -1177,7 +955,7 @@ export function UsersPage() {
               <div className="min-w-0">
                 <h1 className="text-2xl font-bold text-foreground">Users</h1>
                 <p className="text-sm text-muted-foreground">
-                  Manage buyers, sellers, KYC and access status
+                  Manage buyers, sellers, and access status
                 </p>
               </div>
             </div>
@@ -1219,18 +997,6 @@ export function UsersPage() {
                 <option value="buyer">Buyer</option>
                 <option value="seller">Seller</option>
                 <option value="both">Buyer & Seller</option>
-              </select>
-              <select
-                value={kycFilter}
-                onChange={(e) => setKycFilter(e.target.value as KycFilter)}
-                className="h-10 rounded-full border border-border bg-input px-3 text-sm"
-                aria-label="KYC filter"
-              >
-                <option value="all">All KYC</option>
-                <option value="verified">Verified</option>
-                <option value="pending">Pending</option>
-                <option value="rejected">Rejected</option>
-                <option value="not_submitted">Not Submitted</option>
               </select>
               <div className="flex rounded-full border border-border bg-muted/40 p-0.5">
                 <Button
@@ -1308,15 +1074,6 @@ export function UsersPage() {
             No {filterEmptyLabel} users
           </p>
         </div>
-      ) : pageTab === 'kyc' ? (
-        <KycTabLayout
-          users={filtered}
-          viewMode={viewMode}
-          onRowClick={handleView}
-          onPatch={patchUser}
-          onToast={showToast}
-          onRequestBlock={handleRequestBlock}
-        />
       ) : viewMode === 'card' ? (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
           {filtered.map((user) => (
